@@ -47,7 +47,7 @@ for (dataset_num in 1:length(hc_esets)){
 }
 
 
-# Filter the samples to only inf samples that passed QC:
+# Filter the samples to only hc samples that passed QC:
 esets_nw <- list()
 for (dataset_num in 1:length(hc_esets)){
   sub_e <- hc_esets[[dataset_num]][, pData(hc_esets[[dataset_num]])$condition %in% c("healthy","control")]
