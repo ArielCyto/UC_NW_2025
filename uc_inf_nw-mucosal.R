@@ -29,8 +29,9 @@ inf_datasets <- unique(inf_datasets)
 
 # Subset to mucosal datasets only
 mucosal_inf_datasets <- c('E-MTAB-184','E-MTAB-2967','E-MTAB-7604__rnaseq','E-MTAB-7845__rnaseq','GSE16879__GPL570',
-                        'GSE38713__GPL570','GSE47908__GPL570','GSE73661__GPL6244','GSE75214__GPL6244','GSE92415__GPL13158',
-                        'GSE9452__GPL570')
+                        'GSE38713__GPL570','GSE47908__GPL570','GSE75214__GPL6244','GSE92415__GPL13158')
+                        #,'GSE9452__GPL570' - removed due to low correlation,
+                        # ,'GSE73661__GPL6244' - removed due to duplications with GSE75214__GPL6244)
 inf_esets <- .get_esets_ccm(UC_model, esets_names = c(mucosal_inf_datasets))
 
 ##### Generate group table #####
@@ -86,8 +87,8 @@ esets_nw$GSE38713__GPL570 <- esets_nw$GSE38713__GPL570[,sampleNames(esets_nw$GSE
 # esets_nw$GSE206171__GPL13667 <- esets_nw$GSE206171__GPL13667[,sampleNames(esets_nw$GSE206171__GPL13667 ) %in% 
 #                                                                esets_nw$GSE206171__GPL13667 $sample_id[esets_nw$GSE206171__GPL13667$Condition_comment == 'active disease']]
 
-esets_nw$GSE73661__GPL6244 <- esets_nw$GSE73661__GPL6244[,sampleNames(esets_nw$GSE73661__GPL6244 ) %in% 
-                                                           esets_nw$GSE73661__GPL6244 $sample_id[esets_nw$GSE73661__GPL6244$time == 'W0']]
+# esets_nw$GSE73661__GPL6244 <- esets_nw$GSE73661__GPL6244[,sampleNames(esets_nw$GSE73661__GPL6244 ) %in% 
+#                                                            esets_nw$GSE73661__GPL6244 $sample_id[esets_nw$GSE73661__GPL6244$time == 'W0']]
 
 
 
@@ -105,7 +106,7 @@ print(sapply(esets_nw, dim))
 # # https://cyto-cc.cytoreason.com/workflow/wf-0f7f0d29ed
 
 ##### Generate full corr matrix
-net_id <- "first_test_UC_mucosal_inflamed_NW"
+net_id <- "UC_mucosal_inflamed_NW_9_datasets"
 IMAGE <- "eu.gcr.io/cytoreason/ci-cytoreason.individual.variation-package:master_latest"
 default_memory_request <- "200Gi"
 
@@ -119,37 +120,6 @@ full_corr_matrix_res <- get_full_corr_matrix(esets = esets_nw,
 
 #################################################################################
 
-##### Step 2 - check outliers, if any is above 0.2 - remove and repeat step 1
-
-outliers <- check_outliers(reference_edges = "wf-4e48458dd4", image_url = "eu.gcr.io/cytoreason/ci-cytoreason.individual.variation-package:master_latest", mem_request="50Gi", cyto_cc_force_execution=FALSE)
-corrplot::corrplot(as.matrix(outliers), order = "hclust", addCoef.col = "black",
-                   addCoefasPercent=FALSE, method="color",
-                   col=rev(RColorBrewer::brewer.pal(n=10, name="RdBu")))
-
-##### Rerun Step 1
-# we found 4 outliers ao we will rerun step 1 without them:
-outlier_datasets <- c('GSE95437', 'GSE9452', 'GSE38713', 'GSE107593')
-esets_nw_final <- esets_nw
-for (dataset_num in 1:length(names(esets_nw_final))){
-  if (experimentID(esets_nw_final[[dataset_num]]) %in% outlier_datasets){
-    esets_nw_final[[dataset_num]] <- NULL
-  }
-  
-}
-
-group_table_final <- group_table
-group_table_final <- group_table_final[-c(21,22,5,13),]
-group_table_final$experiment_id %in% names(esets_nw_final)
-
-net_id <- "UC_18_datasets_no_outliers"
-full_corr_matrix_res <- get_full_corr_matrix(esets = esets_nw_final,
-                                             group_table = group_table_final,
-                                             IMAGE = IMAGE,
-                                             net_id = net_id,
-                                             gpu = TRUE,
-                                             mem_request = default_memory_request)
-# https://cyto-cc.cytoreason.com/workflow/wf-400754cfd6
-
 ##### Step 3 -  Calculate meta gene-gene correlation matrix
 edge_min_count <- 0
 # if chunk_size is NULL, a default value (1000) will be used
@@ -161,14 +131,13 @@ edge_meta_res <- meta_pvalue_edge(nets = full_corr_matrix_res[["reference_edges_
                                   chunk_size = chunk_size)
 get_workflow(edge_meta_res[["edge_meta"]][["wf_id"]], wait = TRUE)
 
-# https://cyto-cc.cytoreason.com/workflow/wf-3ce827f41f
 all_edges <- cytoreason.io::read_data(cytoreason.cc.client::get_task_outputs(res=edge_meta_res[["edge_meta"]][["wf_id"]], task_id = NULL, task_name = edge_meta_res[["edge_meta"]][["task_name"]]))
 q_pvalue_plot(all_edges)
 
 
 
 ##### Step 4 - Perform edge pruning analysis on meta gene-gene correlation matrix
-edge_pruning_corr <- seq(0.5, 0.8, 0.05)
+edge_pruning_corr <- seq(0.2, 0.8, 0.05)
 fdr_thresholds <- list(c(fdr_th=0.05, q_fdr_th=0.05))
 important_genes <- NULL
 pruning_info_wfid <- 
@@ -191,7 +160,6 @@ pruning_info_wfid <-
   force_execution = FALSE, replace_image_tags = TRUE, 
   tags = list(list("name" = "NW_notebook", "value" =  "edge_pruning_analysis")))
 
-# https://cyto-cc.cytoreason.com/workflow/wf-51feb91884
 
 get_workflow(pruning_info_wfid, wait = TRUE)
 pruning_info <- get_outputs_dist(pruning_info_wfid)$output.rds$edge_pruning_info
