@@ -29,7 +29,7 @@ inf_datasets <- unique(inf_datasets)
 # Subset to colon datasets only
 colon_inf_datasets <- c('GSE107593__rnaseq','GSE174159__rnaseq','GSE206285__GPL13158','GSE193677__GPL16791',
                         'GSE206171__GPL13667','GSE179285__GPL6480','GSE72819__rnaseq','GSE83687__rnaseq',
-                          'GSE23597__GPL570','GSE66407__GPL13667','GSE95437__rnaseq')
+                          'GSE23597__GPL570','GSE66407__GPL13667') #,'GSE95437__rnaseq' - removed due to low corr and low sample size (11))
 inf_esets <- .get_esets_ccm(UC_model, esets_names = c(colon_inf_datasets))
 
 ##### Generate group table #####
@@ -76,8 +76,8 @@ esets_nw$GSE206285__GPL13158 <- inf_esets$GSE206285__GPL13158[,sampleNames(inf_e
 # esets_nw$`E-MTAB-7604__rnaseq` <- inf_esets$`E-MTAB-7604__rnaseq` [,sampleNames(inf_esets$`E-MTAB-7604__rnaseq` ) %in% 
 #                                                                      inf_esets$`E-MTAB-7604__rnaseq` $sample_id[inf_esets$`E-MTAB-7604__rnaseq`$condition == 'inflammatory bowel disease']]
 
-esets_nw$GSE38713__GPL570 <- esets_nw$GSE38713__GPL570[,sampleNames(esets_nw$GSE38713__GPL570 ) %in% 
-                                                         esets_nw$GSE38713__GPL570 $sample_id[esets_nw$GSE38713__GPL570$Condition_comment == 'active disease']]
+# esets_nw$GSE38713__GPL570 <- esets_nw$GSE38713__GPL570[,sampleNames(esets_nw$GSE38713__GPL570 ) %in% 
+#                                                          esets_nw$GSE38713__GPL570 $sample_id[esets_nw$GSE38713__GPL570$Condition_comment == 'active disease']]
 
 # esets_nw$GSE193677__GPL16791 <- esets_nw$GSE193677__GPL16791[,sampleNames(esets_nw$GSE193677__GPL16791 ) %in%
 #                                                                esets_nw$GSE193677__GPL16791 $sample_id[esets_nw$GSE193677__GPL16791$Tissu_type == 'Colon']]
@@ -102,7 +102,7 @@ print(sapply(esets_nw, dim))
 # # https://cyto-cc.cytoreason.com/workflow/wf-0f7f0d29ed
 
 ##### Generate full corr matrix
-net_id <- "first_test_UC_colon_inflamed_NW"
+net_id <- "UC_colon_inflamed_NW_10_datasets"
 IMAGE <- "eu.gcr.io/cytoreason/ci-cytoreason.individual.variation-package:master_latest"
 default_memory_request <- "200Gi"
 
@@ -124,3 +124,56 @@ corrplot::corrplot(as.matrix(outliers), order = "hclust", addCoef.col = "black",
                    addCoefasPercent=FALSE, method="color",
                    col=rev(RColorBrewer::brewer.pal(n=10, name="RdBu")))
 #######################################################################################################
+
+##### Step 3 -  Calculate meta gene-gene correlation matrix
+edge_min_count <- 0
+# if chunk_size is NULL, a default value (1000) will be used
+chunk_size <- NULL
+edge_meta_res <- meta_pvalue_edge(nets = full_corr_matrix_res[["reference_edges_wid"]],
+                                  edge_min_count = edge_min_count,
+                                  IMAGE = IMAGE,
+                                  mem_req = default_memory_request,
+                                  chunk_size = chunk_size)
+get_workflow(edge_meta_res[["edge_meta"]][["wf_id"]], wait = TRUE)
+
+
+all_edges <- cytoreason.io::read_data(cytoreason.cc.client::get_task_outputs(res=edge_meta_res[["edge_meta"]][["wf_id"]], task_id = NULL, task_name = edge_meta_res[["edge_meta"]][["task_name"]]))
+q_pvalue_plot(all_edges)
+
+
+
+##### Step 4 - Perform edge pruning analysis on meta gene-gene correlation matrix
+edge_pruning_corr <- seq(0.2, 0.8, 0.05)
+fdr_thresholds <- list(c(fdr_th=0.05, q_fdr_th=0.05))
+important_genes <- NULL
+pruning_info_wfid <- 
+  run_function_dist(function(full_corr_matrix_res, ...) {
+    pruning_info_res <- cytoreason.individual.variation::edge_pruning_th_comb(...)
+    return(pruning_info_res)
+  },
+  nets = edge_meta_res[["edge_meta"]][["wf_id"]], 
+  nets_task_name = edge_meta_res[["edge_meta"]][["task_name"]],
+  cor_th = edge_pruning_corr, 
+  fdr_ths = fdr_thresholds, 
+  full_corr_matrix_res = full_corr_matrix_res,
+  IMAGE = IMAGE,
+  mem_req = default_memory_request,
+  cytocc = TRUE,
+  plot = FALSE,
+  important_genes = important_genes,
+  image = IMAGE,
+  memory_request = default_memory_request,
+  force_execution = FALSE, replace_image_tags = TRUE, 
+  tags = list(list("name" = "NW_notebook", "value" =  "edge_pruning_analysis")))
+
+
+get_workflow(pruning_info_wfid, wait = TRUE)
+pruning_info <- get_outputs_dist(pruning_info_wfid)$output.rds$edge_pruning_info
+p_nodes(pruning_info)
+p_edges(pruning_info)
+p_components(pruning_info)
+p_paretofront(pruning_info)
+if (!is.null(important_genes)){
+  p_important_genes(pruning_info)
+}
+
