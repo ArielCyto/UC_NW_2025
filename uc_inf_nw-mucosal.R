@@ -162,7 +162,7 @@ pruning_info_wfid <-
 
 
 get_workflow(pruning_info_wfid, wait = TRUE)
-pruning_info <- get_outputs_dist(pruning_info_wfid)$output.rds$edge_pruning_info
+pruning_info <- get_outputs_dist('wf-08d37a2968')$output.rds$edge_pruning_info
 p_nodes(pruning_info)
 p_edges(pruning_info)
 p_components(pruning_info)
@@ -170,3 +170,54 @@ p_paretofront(pruning_info)
 if (!is.null(important_genes)){
   p_important_genes(pruning_info)
 }
+
+##### Step 5
+# use case 1: postprocess edge meta output
+nets = consume_workflow_task_output(wf = edge_meta_res[["edge_meta"]][["wf_id"]], 
+                                    task_id = NULL,
+                                    task_name = edge_meta_res[["edge_meta"]][["task_name"]])
+
+# use case 2: postprocess on previous orchestrated_edge_pruning results
+
+# See orchestrated_edge_pruning doc for details regarding parameters 
+prune <- c("min_abs_corr" = 0.55, "max_fdr" = 0.05, "min_q_fdr" = 0.05)
+corr_direction <- "none"
+subset_gene_list <- NULL
+min_connected_component <- NULL
+filter_components <- NULL
+post_processes_nw <- 
+  run_function_dist(cytoreason.individual.variation::orchestrated_edge_pruning,
+                    nets = nets, 
+                    prune = prune, 
+                    corr_direction = corr_direction, 
+                    subset_gene_list = subset_gene_list,
+                    min_connected_component = min_connected_component,
+                    filter_components = filter_components,
+                    image = IMAGE,
+                    memory_request = default_memory_request,
+                    force_execution = FALSE, replace_image_tags = TRUE, 
+                    tags = list(list("name" = "NW_notebook", "value" = "orchestrated_edge_pruning")))
+
+# https://cyto-cc.cytoreason.com/workflow/wf-5ee339dc90
+
+nw_measures <- 
+  run_function_dist(function(nets, ...) {
+    graph <- cytoreason.individual.variation::get_as_graph(nets, nodes_columns = c("Var1","Var2"))
+    cytoreason.individual.variation::compute_measures(graph, ...)
+  },
+  nets = consume_workflow_task_output(wf = post_processes_nw), 
+  cytocc = TRUE, 
+  mem_req = default_memory_request,
+  IMAGE = IMAGE,
+  image = IMAGE,
+  memory_request = default_memory_request, 
+  force_execution = FALSE, replace_image_tags = TRUE, 
+  tags = list(list("name" = "NW_notebook", "value" = "compute_measures")))
+# https://cyto-cc.cytoreason.com/workflow/wf-f92e284fb6
+
+get_workflow(nw_measures, wait = TRUE)
+nw_measures_res <- readRDS(get_task_outputs(nw_measures, task_id = 0, files_names_grepl_pattern = "output.rds"))
+head(nw_measures_res)
+write.csv(nw_measures_res, '~/UC_NW_2025/outputs/inf_mucosal_nw_measures_res_0.55.csv')
+
+
