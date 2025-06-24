@@ -66,3 +66,26 @@ esets_nw$GSE206171__GPL13667 <- esets_nw$GSE206171__GPL13667[,sampleNames(esets_
 
 
 print(sapply(esets_nw, dim))
+
+
+##### Generate full corr matrix
+net_id <- "hc_nw_UC"
+IMAGE <- "eu.gcr.io/cytoreason/ci-cytoreason.individual.variation-package:master_latest"
+default_memory_request <- "200Gi"
+
+##### Step 1 - generate full correlation matrix
+full_corr_matrix_res <- get_full_corr_matrix(esets = esets_nw,
+                                             group_table = group_table,
+                                             IMAGE = IMAGE,
+                                             net_id = net_id,
+                                             gpu = TRUE,
+                                             mem_request = default_memory_request)
+
+##### Step 2 - check outliers, if any is above 0.2 - remove and repeat step 1
+
+outliers <- check_outliers(reference_edges = "wf-3283822bf6", image_url = "eu.gcr.io/cytoreason/ci-cytoreason.individual.variation-package:master_latest", mem_request="20Gi", cyto_cc_force_execution=FALSE)
+corrplot::corrplot(as.matrix(outliers), order = "hclust", addCoef.col = "black",
+                   addCoefasPercent=FALSE, method="color",
+                   col=rev(RColorBrewer::brewer.pal(n=10, name="RdBu")))
+
+

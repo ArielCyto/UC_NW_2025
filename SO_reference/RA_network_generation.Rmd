@@ -1,0 +1,2435 @@
+---
+title: Generating RA network
+subtitle: 'network generation'
+output: 
+  html_document:
+    toc: true
+    toc_depth: 6
+editor_options: 
+  chunk_output_type: console
+---
+
+# Took the code from Shiran Vainberg (Who run it on AD for the J&J project) - customized it to RA
+------------------------------------------------------------------------
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, eval = FALSE)
+options(DT.fillContainer = TRUE)
+```
+
+# 1 -- Setup
+
+load libraries
+
+```{r, include=T, echo = T}
+
+Sys.setenv(GITHUB_PAT = system("coder external-auth access-token cyto-github", intern = TRUE))
+#library(cytoreason.platform.client)
+#install.packages("cytoreason.platform")
+library(cytoreason.platform)
+#install.packages("cytoreason.platform.catalog")
+library(cytoreason.platform.catalog)
+
+devtools::load_all("~/capsule/code/cytoreason.ccm.pipeline/") #branch service/custom-geneset-collection
+options(cytoreason.cache_directory = "~/capsule/scratch/cytoreason_cache/cache",
+        cytoreason.asset_directory = "~/capsule/scratch/cytoreason_cache/asset_files",
+        "cytoreason.datasource:cache" = "~/capsule/scratch/cytoreason_cache/cach",
+        stringsAsFactors = FALSE, # always good to set to FALSE
+        nwarnings = 10000 # capture all warnings
+)
+
+
+#install additional public packages
+library(stringr)
+library(dplyr)
+library(checkmate)
+library(testthat)
+library(scales)
+library(igraph)
+library(visNetwork)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+#install.packages("patchwork")
+library(patchwork)
+library(ggplot2)
+library(bigrquery)
+
+retrive_me <- function(my_object = my_object ){
+  return(my_object)
+}
+
+
+```
+
+
+# 2 -- network generation
+
+<details>
+
+<summary>full network generation</summary>
+
+## 2.1 -- full network generation
+
+### inputs 
+
+input ccm (generic model)
+```{r }
+ccm_fit_RA <- "wf-0e9003bd43"
+ra.ccm = as_ccm_fit(ccm_fit_RA)
+ra.config = modelMetadata(ra.ccm) # to create the modified config needed for get_res_dist
+
+model_team_bulk_full_nw <- "wf-7a1168f2fb" #the RA bulk conserved nw (Daniel Weizman run it)
+n_inputs <- get_task_inputs(model_team_bulk_full_nw ,task_id="0")
+n_inputs <- sapply(n_inputs, readRDS)
+
+
+```
+
+input esets
+```{r }
+
+#subset for RA samples only and for treatment eset use only baseline samples
+#filter esets with less than 5 samples in the above conditions
+
+.get_esets_ccm <- function(ccmfit, esets_names=NULL) {
+  if (is.null(esets_names)) {
+    esets_names <- names(ccmfit$datasets)
+  }
+  esets <- lapply(esets_names, function(nam) assayDataExpression(ccmfit, nam))
+  names(esets) <- esets_names
+  esets
+}
+
+# I went through the datasets in the model, excluded the outlier datasets based on the MT dataset-cor QC, and datasets with only 5 RA samples:
+ra_esets_orig <- .get_esets_ccm(ra.ccm, esets_names = c("GSE153015__GPL570","GSE48780__GPL570","GSE55457__GPL96",
+"GSE55584__GPL96","GSE77298__GPL570","GSE89408__GPL11154","GSE172188__GPL570","GSE24742__GPL570","GSE45867__GPL570","GSE97165__GPL11154"))
+
+# Filter the samples to only RA samples that passed QC:
+esets_nw <- lapply(names(ra_esets_orig), function(cur_eset){
+  sub_e <- ra_esets_orig[[cur_eset]][,pData(ra_esets_orig[[cur_eset]])$condition %in% "rheumatoid arthritis"]
+  if(any(pData(sub_e)$validator_qc %in% "Exclude")) {
+    sub_e <- sub_e[,!pData(sub_e)$validator_qc %in% "Exclude"]
+  }
+  exclude_samp <- unique(ra.config$exclude_samples)[!is.na(unique(ra.config$exclude_samples))]
+  if(any(pData(sub_e)$sample_id %in% exclude_samp)) {
+    sub_e <- sub_e[,!pData(sub_e)$sample_id %in% exclude_samp]
+  }
+  if(dim(sub_e)[2]<=5){
+    NA
+  }else{
+    sub_e
+  }
+})
+names(esets_nw) <- names(ra_esets_orig)
+
+# Further remove post treatment samples non-inflamed or unclassified (only relevant to GSE48780__GPL570):
+esets_nw <- lapply(names(esets_nw), function(cur_eset){
+  if(cur_eset=="GSE48780__GPL570"){
+    sub_e <- ra_esets_orig[[cur_eset]][,pData(esets_nw[[cur_eset]])$sample_classification=="Inflamed"]
+  }else if(cur_eset%in%c("GSE172188__GPL570","GSE24742__GPL570","GSE45867__GPL570","GSE97165__GPL11154")){
+    sub_e <- ra_esets_orig[[cur_eset]][,pData(esets_nw[[cur_eset]])$time%in%c("W0","M0")]
+  }else{
+    sub_e <- esets_nw[[cur_eset]]
+  }
+  sub_e
+})
+names(esets_nw) <- names(ra_esets_orig)
+
+do.call('rbind',lapply(names(esets_nw),function(d){ # get the number of included samples per dataset
+  n_samples <- ncol(esets_nw[[d]])
+  data.frame(dataset=d,n_samples=n_samples)
+}))
+
+esets_nw <- lapply(esets_nw, function(cur_e) {
+  pData(cur_e)$nw <- "RA"
+  return(cur_e)
+})
+
+group_table <- data.frame(experiment_id=names(esets_nw),
+                          group_variable="nw",
+                          reference_category="RA")
+# Not used:
+# ra_esets_orig <- .get_esets_ccm(ra.ccm, esets_names = names(ra.ccm$datasets))
+# (cytoreason.cc.client::run_function_dist(retrive_me,my_object=ra_esets_orig,image="eu.gcr.io/cytoreason/ci-cytoreason.ccm.pipeline-package:develop_0.55.1")) # wf-1e0d19e1bc
+# ra_esets_orig <- read_asset("wf-1e0d19e1bc")
+# 
+# ra.config = modelMetadata(ra.ccm) # to create the modified config needed for get_res_dist
+# 
+# treatment_assets <- ra.config[grepl("Treatment", ra.config$model_type,'dataset_id'),]
+# treatment_datasetId <- unique(treatment_assets$dataset_id)
+# 
+# ra_esets_dzId <- names(ra_esets_orig)[!names(ra_esets_orig) %in% treatment_datasetId]
+# 
+# ra_esets_dzId <- ra_esets_dzId[!ra_esets_dzId %in% c("GSE55235__GPL96","GSE36700__GPL570","GSE93698__GPL570","GSE15602__GPL570")] # An explanation why I removed these datasets in: https://cytoreason.sharepoint.com/:x:/r/P01/Shared%20Documents/D%26D%20I%26I/D%26D%20_I%26I_12%20-%20Extention-2%20RA%20combination%20ranking/results/RA_full_network/Network_included_samples.xlsx?d=w9684fbc432b44685816712d113954094&csf=1&web=1&e=eLLtwF
+# 
+# 
+# ra_esets_orig_treatment <- ra_esets_orig[names(ra_esets_orig) %in% treatment_datasetId]
+# 
+# temp <- do.call('rbind', lapply(names(ra_esets_orig_treatment), function(cur_eset) {
+#   eset <- ra_esets_orig_treatment[[cur_eset]]
+#   df <- pData(eset)
+#   if(any(colnames(df) %in% "time")) {
+#     res <- data.frame(eset=cur_eset, time_val=unique(df$time), stringsAsFactors = F)
+#     return(res)
+#   }
+# }))
+# 
+# 
+# baseline_timeTerms <- c("W0", "D0", "pre","Pre","M0") #exclude assets with D1 - do not consider as baseline
+# 
+# temp <- do.call('rbind', lapply(names(ra_esets_orig_treatment), function(cur_eset) {
+#   eset <- ra_esets_orig_treatment[[cur_eset]]
+#   df <- pData(eset)
+#   res <- data.frame(eset=cur_eset, condition_val=unique(df$condition), stringsAsFactors = F)
+#   return(res)
+# }))
+# 
+# temp <- do.call('rbind', lapply(names(ra_esets_orig_treatment), function(cur_eset) {
+#   eset <- ra_esets_orig_treatment[[cur_eset]]
+#   df <- pData(eset)
+#   res <- data.frame(eset=cur_eset, sample_classification_val=unique(df$sample_classification), stringsAsFactors = F)
+#   return(res)
+# }))
+# esets_nw <- lapply(names(ra_esets_orig), function(cur_eset){
+#   sub_e <- ra_esets_orig[[cur_eset]][,pData(ra_esets_orig[[cur_eset]])$condition %in% "rheumatoid arthritis"]
+#   if(cur_eset %in% treatment_datasetId) {
+#     sub_e <- ra_esets_orig[[cur_eset]][,pData(ra_esets_orig[[cur_eset]])$time %in% baseline_timeTerms &
+#                                          pData(ra_esets_orig[[cur_eset]])$sample_classification %in% "Inflamed" &
+#                                          pData(ra_esets_orig[[cur_eset]])$condition %in% "rheumatoid arthritis"]
+#   } 
+#   if(cur_eset %in% ra_esets_dzId) {
+#     sub_e <- ra_esets_orig[[cur_eset]][,pData(ra_esets_orig[[cur_eset]])$sample_classification %in% "Lesion" &
+#                                          pData(ra_esets_orig[[cur_eset]])$condition %in% "atopic dermatitis"]
+#   }
+#   if(any(pData(sub_e)$validator_qc %in% "Exclude")) {
+#     sub_e <- sub_e[,!pData(sub_e)$validator_qc %in% "Exclude"]
+#   }
+#   exclude_samp <- unique(ra.config$exclude_samples)[!is.na(unique(ra.config$exclude_samples))]
+#   if(any(pData(sub_e)$sample_id %in% exclude_samp)) {
+#     sub_e <- sub_e[,!pData(sub_e)$sample_id %in% exclude_samp]
+#   }
+#   if (dim(sub_e)[2] <=5){
+#     NA
+#   }
+#   else{
+#     sub_e
+#   }
+# })
+# 
+# names(esets_nw) <- names(ra_esets_orig)
+# eset_to_exclude <- names(esets_nw)[unlist(lapply(esets_nw, function(x) is.na(x)))]
+# esets_nw <- esets_nw[!names(esets_nw) %in% eset_to_exclude]
+# 
+# esets_nw <- lapply(esets_nw, function(cur_e) {
+#   pData(cur_e)$nw <- "L"
+#   return(cur_e)
+# } )
+# 
+# group_table <- data.frame(experiment_id=names(esets_nw),
+#                           group_variable="nw",
+#                           reference_category="L")
+
+```
+
+input genes
+```{r}
+
+#use all genes for the gene_list argument in the nw pipeline
+gene_list <- list(all=unique(do.call('c', lapply(ra_esets_orig, function(cur_eset) {
+  featureNames(cur_eset)
+}))
+))
+```
+
+
+### run full correlation network pipeline
+
+```{r }
+(wfid <- run_method_dist(method="service_generate_modules", 
+                         ns=n_inputs$ns, 
+                         assay_element=n_inputs$assay_element, 
+                         edge_list.args=n_inputs$edge_list.args,
+                         esets=esets_nw, 
+                         disease="rheumatoid arthritis",
+                         gene_list=gene_list,
+                         group_table = group_table,
+                         memory_request_modules=n_inputs$memory_request_modules, 
+                         image_modules="eu.gcr.io/cytoreason/ci-cytoreason.individual.variation-package:master_1.1.11",
+                         steps="full_corr_matrix", 
+                         module.args=n_inputs$module.args,
+                         memory_request = "50Gi",
+                         image="eu.gcr.io/cytoreason/ci-cytoreason.individual.variation-package:master_1.1.11"))
+
+# wf-d208dc0a06 # SUCCEEDED
+get_workflow_progress(c('wf-d208dc0a06'))
+
+#wf-a1c7b8f847 # Shiran (AD)
+
+```
+
+### check outlier datasets
+
+Identify outlier datasets
+
+```{r }
+
+#within wf-d208dc0a06 there is the full correlation step that is stored as a wf:
+wf_non_conserv_bulk_ra <- "wf-6fd024d29d"
+get_workflow_progress(c('wf-6fd024d29d')) # SUCCEEDED
+
+# Shiran:
+#within wf-a1c7b8f847 there is the full correlation step that is stored as a wf:
+#wf_non_conserv_bulk_ad <- "wf-ed33347f46"
+
+full_cor_obj <- get_workflow_outputs(wf_non_conserv_bulk_ra)
+full_cor_obj <- readRDS(full_cor_obj)
+wf_dataset_specific <- full_cor_obj[["data_specific_info"]] #the output is wf
+wf_dataset_specific
+#wf-08e3c56bc2
+
+wf_dataset_specific <- "wf-08e3c56bc2"
+(wfid_outlier_check <- run_method_dist(method=".check_outliers_remote", 
+                                       ns="analysis.p03.POC1",
+                                       reference_edges=get_workflow_id((wf_dataset_specific)),
+                                       cor = "cor",
+                                       edge = "edge",
+                                       output_dir="./output",
+                                       mem_req='10Gi',
+                                       cyto_cc_force_execution=T,
+                                       image_url="eu.gcr.io/cytoreason/ci-analysis.p03.poc1-package:shiran_API_latest",
+                                       image="eu.gcr.io/cytoreason/ci-analysis.p03.poc1-package:shiran_API_latest"))
+
+#wf-c1a988348c - shiran
+
+#wf-8f88f2bc0b
+get_workflow_progress(c('wf-8f88f2bc0b')) # SUCCEEDED
+oulier_res <- readRDS(get_workflow_outputs("wf-8f88f2bc0b")[2])
+
+#--- plot outlier results ---
+
+# ht <- Heatmap(oulier_res,
+#               rect_gp = gpar(col = "white", lwd = 2), row_title = NULL,
+#               col=c("#f0e3ab", "#f49d77", "#ce5f5f", "#b23030"),
+#               name="ccorrelation", 
+#               row_names_gp = gpar(fontsize = 8), 
+#               column_names_gp = gpar(fontsize = 7), show_row_names = TRUE, show_column_names = T,
+#               column_names_rot = 90, column_names_max_height = unit(10,"cm"), 
+#               cell_fun = function(j, i, x, y, width, height, fill) {
+#                 grid.text(sprintf("%.2f", oulier_res[i,j]), x, y, gp = gpar(fontsize = 10))})
+# 
+# draw(ht, padding = unit(c(2, 2, 2, 90), "mm"), heatmap_legend_side = "left") #bottom, left, top, right paddings
+
+library(pheatmap)
+
+# Define a color palette with sufficient length
+color_palette <- colorRampPalette(c("#f0e3ab", "#f49d77", "#ce5f5f", "#b23030"))(100)
+
+# Create a heatmap with pheatmap
+ht <- pheatmap(
+  oulier_res,
+  color = color_palette, # Use the color palette with a gradient
+  display_numbers = TRUE, # Show cell values
+  number_format = "%.2f", # Format values to 2 decimal places
+  number_color = "black", # Set number color
+  fontsize = 8, # Font size for matrix values
+  fontsize_row = 8, # Row name font size
+  fontsize_col = 7, # Column name font size
+  angle_col = 90, # Rotate column names to 90 degrees
+  border_color = "white" # White borders
+)
+
+ht
+
+#distribution of correlations per dataset
+oulier_res_long <- reshape2::melt(oulier_res)
+oulier_res_long$class <- ifelse(oulier_res_long$Var2 %in% c("GSE172188__GPL570","GSE24742__GPL570","GSE45867__GPL570","GSE97165__GPL11154"), "treatment", "disease")
+
+
+ggplot(oulier_res_long, aes(x = value, y=Var2, fill=class)) +
+  ggridges::geom_density_ridges2() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), strip.text = element_text(size=7))+
+  ylab("correlation of correlations")+ xlab("correlation")+
+  #ylab("correlation of correlations")+ xlab("FDR val")+
+  theme_bw()+
+  theme(strip.text = element_text(size=8), panel.grid.major = element_blank(),
+        axis.text.y=element_text( size=8),
+        axis.text.x=element_text(size=8, angle=90),
+        panel.grid.minor = element_blank(),                                            
+        strip.background = element_blank(),
+        panel.border =element_blank(),
+        legend.position = "left",
+        axis.ticks.length=unit(.15, "cm"))
+
+res <- do.call('rbind', lapply(unique(oulier_res_long$Var2), function(cur_dataset) {
+  sub <- oulier_res_long[oulier_res_long$Var2 %in% cur_dataset,]
+  data.frame(dataset=cur_dataset, mean=mean(sub$value), median=median(sub$value), stringsAsFactors = F)
+}))
+
+```
+
+rerun the networks excluding the outlier datasets
+
+```{r}
+
+#--- define outlier datasets ---
+
+DefineOutliers = oulier_res_long %>%
+  dplyr::filter(Var1 != Var2) %>%
+  group_by(Var1) %>%
+  dplyr::summarise(max = max(value),
+                   median = median(value))
+                   
+Outliers = DefineOutliers %>%
+  dplyr::filter(max <= 0.2 | median <= 0.1)  %>%
+  pull(Var1) %>%
+  as.character()
+
+#--- use Adir's improved code to run the full correlation nw ---
+
+wf_non_conserv_bulk_ra <- "wf-6fd024d29d"
+bb <- get_task_inputs(wf_non_conserv_bulk_ra,task_id = 0,should_download_files = T)
+bb <- sapply(bb, readRDS)
+
+group_table <- bb$group_table %>%
+  dplyr::filter(!experiment_id %in% Outliers)
+assay_element <- bb$assay_element
+def_data_specific_edges <- bb$def_data_specific_edges
+edge_min_count <- bb$edge_min_count
+
+gene_based <- bb$gene_based
+esets <- bb$esets[!(names(bb$esets) %in% Outliers)]
+gene_list <- list(all=unique(do.call('c', lapply(esets, function(cur_eset) {
+  featureNames(cur_eset)
+}))))
+
+net_id <- bb$net_id
+to_propagate <- bb$to_propagate
+method <- bb$method
+min_n_genes <- length(gene_list$all) - 1
+ns <- bb$ns
+to_prune <- bb$to_prune
+lean_output <- bb$lean_output
+max_n_genes <- length(gene_list$all) +1
+
+
+IMAGE <- "eu.gcr.io/cytoreason/ci-cytoreason.individual.variation-package:SUP_4695_1.2.0"
+
+(step_full_corr_matrix_wfid_bulk <- run_method_dist(method="step_edge_meta_analysis",
+                                              ns="cytoreason.individual.variation",
+                                              gene_list = gene_list,
+                                              min_n_genes = min_n_genes,
+                                              max_n_genes = max_n_genes,
+                                              esets = esets,
+                                              group_table = group_table,
+                                              def_data_specific_edges=def_data_specific_edges,
+                                              gene_based = TRUE,
+                                              assay_element = assay_element,
+                                              to_propagate = FALSE,
+                                              to_prune = FALSE,
+                                              lean_output = FALSE,
+                                              net_id = net_id,
+                                              IMAGE = IMAGE,
+                                              image = IMAGE,
+                                              tags = list(list(name = "step", value = "full_corr_matrix")),
+                                              edge_min_count = 0, force_execution = TRUE, 
+                                              memory_request = "80Gi"))
+
+#wf-be39e4f377 bulk - image 1.2.0
+get_workflow_progress(c('wf-be39e4f377')) # SUCCEEDED
+
+# Shiran's:
+#wf-70dfac1986 bulk - image 1.2.0
+#wf-558ff665ef bulk - old image 1.1.11
+
+## Distribution of q-p_value (how many edges are below/above 0.02)
+# Check the edge heterogeneity distribution - is q_pvalue≥0.02 is uniformly distributed (or do we still need FDR correction)?
+RA_network_bulk <- readRDS(get_workflow_outputs("wf-be39e4f377"))
+RA_nw_bulk_q_pvalue_hist <- ggplot(RA_network_bulk$edge_meta, aes(x = q_pvalue)) +
+  geom_histogram(binwidth = 0.005, fill = "skyblue", color = "black") +
+  geom_vline(xintercept = 0.02, linetype = "dashed", color = "red", linewidth = 1) +
+  labs(title = paste0("RA q_pvalue distribution"),
+       x = "Edge q_pvalue",
+       y = "No. edges") +
+  theme_minimal()+
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14),
+    legend.position = "none",
+    plot.title = element_text(size = 10, hjust = 0.5,face='bold'))
+ggsave(paste0("~/capsule/scratch/RA_network/RA_q_pvalue_distribution.pdf"), plot = RA_nw_bulk_q_pvalue_hist)
+
+# FDR correct the q_pvalue:
+RA_network_bulk$edge_meta$q_FDR <- p.adjust(RA_network_bulk$edge_meta$q_pvalue,method="BH")
+cor.test(RA_network_bulk$edge_meta$q_FDR,RA_network_bulk$edge_meta$fdr,na.rm=T) # r=-0.1963212, p-value < 2.2e-16
+cor.test(RA_network_bulk$edge_meta$q_FDR,RA_network_bulk$edge_meta$fdr,na.rm=T,method="spearman") # rho=-0.224661, p-value < 2.2e-16
+
+RA_nw_bulk_q_FDR_hist <- ggplot(RA_network_bulk$edge_meta, aes(x = q_FDR)) +
+  geom_histogram(binwidth = 0.005, fill = "skyblue", color = "black") +
+  geom_vline(xintercept = 0.05, linetype = "dashed", color = "black", linewidth = 1) +
+  geom_vline(xintercept = 0.02, linetype = "dashed", color = "red", linewidth = 1) +
+  labs(title = paste0("RA q_FDR distribution"),
+       x = "Edge q_FDR",
+       y = "No. edges") +
+  theme_minimal()+
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14),
+    legend.position = "none",
+    plot.title = element_text(size = 10, hjust = 0.5,face='bold'))
+ggsave(paste0("~/capsule/scratch/RA_network/RA_q_FDR_distribution.pdf"), plot = RA_nw_bulk_q_FDR_hist)
+
+# Need to look at the number of edges kept (edge ≥ cutoff) for different q_FDR and q_pvalue cutoffs:
+# We don't have time - pass it on to the MT for guidelines regarding network generation and validation...
+###
+
+
+(step_full_corr_matrix_wfid_adjusted <- run_method_dist(method="step_edge_meta_analysis",
+                                                   ns="cytoreason.individual.variation",
+                                                   gene_list = gene_list,
+                                                   min_n_genes = min_n_genes,
+                                                   max_n_genes = max_n_genes,
+                                                   esets = esets,
+                                                   group_table = group_table,
+                                                   def_data_specific_edges=def_data_specific_edges,
+                                                   gene_based = TRUE,
+                                                   assay_element = "exprs_adjusted__1__1",
+                                                   to_propagate = FALSE,
+                                                   to_prune = FALSE,
+                                                   lean_output = FALSE,
+                                                   net_id = net_id,
+                                                   IMAGE = IMAGE,
+                                                   image = IMAGE,
+                                                   tags = list(list(name = "step", value = "full_corr_matrix")),
+                                                   edge_min_count = 0, force_execution = TRUE, 
+                                                   memory_request = "80Gi"))
+#wf-8f618e80d4 # with "exprs_adjusted__1__1"
+get_workflow_progress(c('wf-8f618e80d4')) # SUCCEEDED # need to select a cutoff...
+
+# Shiran's:
+#wf-726f38473b - # adjusted__1__meta_pc1_keratinocyte - image 1.2.0
+```
+
+</details>
+
+<details>
+
+<summary>Prune network</summary>
+
+## 2.2  --prune network
+
+pruning includes the following cutoffs: - filter fdr\<0.05, - Chochrane's Q \> 0.02 - testing a range of correlation cutoffs. The optimal correlation cut point is the highest possible cutoff that preserves the majority of nodes and minimize the number of edges.
+
+```{r}
+
+Multiple_cut_NW <- run_method_dist(method="filter_nw", 
+                                  ns="analysis.p03.POC1",
+                                  NW_WFID = "wf-be39e4f377",
+                                  cor_cut_seq = seq(0,.8,.05),
+                                  memory_request='40Gi',
+                                  image="eu.gcr.io/cytoreason/ci-analysis.p03.poc1-package:AJ_analysis_latest")
+#wf-7186ad6e84 - bulk
+get_workflow_progress(c('wf-7186ad6e84')) # SUCCEEDED
+
+# Shiran's:
+#wf-06da2e64ae - bulk
+
+
+(Multiple_cut_NW <- run_method_dist(method="filter_nw", 
+                                  ns="analysis.p03.POC1",
+                                  NW_WFID = "wf-8f618e80d4",
+                                  cor_cut_seq = seq(0,.8,.05),
+                                  memory_request='40Gi',
+                                  image="eu.gcr.io/cytoreason/ci-analysis.p03.poc1-package:AJ_analysis_latest"))
+# wf-3f29f6bb93 -  adj
+get_workflow_progress(c('wf-3f29f6bb93')) # SUCCEEDED
+
+# Shiran's:
+# wf-2f9a893b09 -  adj
+
+
+#### Read metrics cross cutoff ###
+
+Bulk_CutoffData <- read_data(AssetData("wf-7186ad6e84:0:output.rds"))
+Bulk_multicut.combo  <- bind_rows(Bulk_CutoffData)
+write.csv(Bulk_multicut.combo,"~/capsule/scratch/RA_network/RA_BulkNW_CutoffInfo.csv")
+
+
+Nodes <- Bulk_multicut.combo %>%
+  ggplot(aes(x = cor_cut,y = nNodes)) +
+  geom_point() + geom_line() + theme_minimal() +
+  theme(aspect.ratio = .7) +
+  ggtitle("RA Bulk NW")
+
+Edges <- Bulk_multicut.combo %>%
+  ggplot(aes(x = cor_cut,y = nEdges)) +
+  geom_point() + geom_line() + theme_minimal() + 
+  theme(aspect.ratio = .7) 
+
+ConnectedNodes <- Bulk_multicut.combo %>%
+  ggplot(aes(x = cor_cut,y = nConnectedGenes)) +
+  geom_point() + geom_line() + theme_minimal() + 
+  theme(aspect.ratio = .7)
+
+all_plots <- Nodes + Edges + ConnectedNodes + plot_layout(ncol = 1)
+ggsave("~/capsule/scratch/RA_network/RA_Bulk_NW_Filter.pdf", plot = all_plots) # .tiff
+
+# Pareto front:
+Paretofront <- Bulk_multicut.combo %>%
+  ggplot(aes(x = nNodes, y = nEdges, color = factor(cor_cut))) +
+  geom_point() + 
+  geom_line() + 
+  geom_text(aes(label = cor_cut), vjust = -0.5, hjust = 0.5, size = 3) +  # Add labels with slight offset
+  theme_minimal() + 
+  theme(aspect.ratio = .7, legend.position = "none") +  # Remove color legend
+  labs(x = "No. nodes", y = "No. edges")  # Change axis titles
+ggsave("~/capsule/scratch/RA_network/RA_Bulk_NW_Pareto_front.pdf", plot = Paretofront)
+
+# Looks like r cutoff should be either 0.45 or 0.5
+
+Adj_CutoffData <- read_data(AssetData("wf-3f29f6bb93:0:output.rds"))
+Adj_multicut.combo  = bind_rows(Adj_CutoffData)
+write.csv(Adj_multicut.combo,"~/capsule/scratch/RA_network/RA_AdjNW_CutoffInfo.csv")
+
+Nodes <- Adj_multicut.combo %>%
+  ggplot(aes(x = cor_cut,y = nNodes)) +
+  geom_point() + geom_line() + theme_minimal() +
+  theme(aspect.ratio = .7) +
+  ggtitle("RA Adj NW") 
+
+Edges <- Adj_multicut.combo %>%
+  ggplot(aes(x = cor_cut,y = nEdges)) +
+  geom_point() + geom_line() + theme_minimal() +
+  theme(aspect.ratio = .7) 
+
+ConnectedNodes = Adj_multicut.combo %>%
+  ggplot(aes(x = cor_cut,y = nConnectedGenes)) +
+  geom_point() + geom_line() + theme_minimal() +
+  theme(aspect.ratio = .7) 
+
+
+all_plots <- Nodes + Edges + ConnectedNodes + plot_layout(ncol = 1)
+ggsave("~/capsule/scratch/RA_network/RA_Adj_NW_Filter.pdf", plot = all_plots) # .tiff
+
+# Pareto front:
+Paretofront <- Adj_multicut.combo %>%
+  ggplot(aes(x = nNodes, y = nEdges, color = factor(cor_cut))) +
+  geom_point() + 
+  geom_line() + 
+  geom_text(aes(label = cor_cut), vjust = -0.5, hjust = 0.5, size = 3) +  # Add labels with slight offset
+  theme_minimal() + 
+  theme(aspect.ratio = .7, legend.position = "none") +  # Remove color legend
+  labs(x = "No. nodes", y = "No. edges")  # Change axis titles
+ggsave("~/capsule/scratch/RA_network/RA_Adj_NW_Pareto_front.pdf", plot = Paretofront)
+
+# For RA_Adj_NW it looks like r≥0.4 or 0.45 is ideal
+
+#Retrieve Igraph and edge table from specific cor cutoff
+# r ≥ 0.5
+bulk_wf_res <- get_workflow_outputs("wf-7186ad6e84")
+bulk_wf_outputs_0.5 <- readRDS(bulk_wf_res['igraph_NW_sub_0.5.rds',1])
+nw_bulk_pruned <- igraph::as_data_frame(bulk_wf_outputs_0.5, what = "edges")
+colnames(nw_bulk_pruned)[colnames(nw_bulk_pruned) %in% "from"] <- "var1"
+colnames(nw_bulk_pruned)[colnames(nw_bulk_pruned) %in% "to"] <- "var2"
+
+cyto_cc_push_object(nw_bulk_pruned,"ra_nw_bulk_pruned_0.5") # long format (gene/gene/cor)
+(cytoreason.cc.client::run_function_dist(retrive_me,my_object=nw_bulk_pruned,image="eu.gcr.io/cytoreason/ci-cytoreason.ccm.pipeline-package:develop_0.55.1")) # wf-132ef51c4d
+get_workflow_progress(c('wf-132ef51c4d')) # SUCCEEDED
+nw_bulk_pruned <- readRDS(get_workflow_outputs("wf-132ef51c4d"))
+
+#Shiran's: wf-a7057224d0
+
+get_cor_matrix <- function(nw_pruned){
+  on.exit(gc())
+  # Convert to wide format:
+  nw_pruned_mat <- reshape2::dcast(nw_pruned[, c("var1", "var2", "cor")], var1 ~ var2, value.var = "cor")
+  rownames(nw_pruned_mat) <- nw_pruned_mat[["var1"]]
+  nw_pruned_mat[["var1"]] <- NULL
+  nw_pruned_mat <- as.matrix(nw_pruned_mat)
+  #
+  # Ensure matrix has all unique row and column names
+  all_names <- union(rownames(nw_pruned_mat), colnames(nw_pruned_mat))
+  new_nw_pruned_mat <- matrix(NA, nrow = length(all_names), ncol = length(all_names))
+  rownames(new_nw_pruned_mat) <- colnames(new_nw_pruned_mat) <- all_names
+  #
+  # Fill the new matrix with values from the original matrix
+  nw_pruned_mat_df <- as.data.frame(as.table(nw_pruned_mat), stringsAsFactors = FALSE)
+  new_nw_pruned_mat[cbind(match(nw_pruned_mat_df$Var1, all_names), match(nw_pruned_mat_df$Var2, all_names))] <- nw_pruned_mat_df$Freq
+  #
+  # Order rows and columns
+  new_nw_pruned_mat <- new_nw_pruned_mat[order(rownames(new_nw_pruned_mat)), order(colnames(new_nw_pruned_mat))]
+  nw_pruned_mat <- as.matrix(new_nw_pruned_mat)
+  diag(nw_pruned_mat) <- 1
+  #
+  # Make the matrix symmetrical
+  make_symmetric <- function(mat) {
+    mat[lower.tri(mat)] <- t(mat)[lower.tri(mat)]
+    return(mat)
+  }
+  #
+  nw_pruned_mat <- make_symmetric(nw_pruned_mat)
+  return(nw_pruned_mat)
+}
+
+nw_bulk_pruned_mat <- get_cor_matrix(nw_bulk_pruned)
+gc()
+cyto_cc_push_object(nw_bulk_pruned_mat,"ra_nw_bulk_pruned_mat_0.5") # cor matrix (r≥0.5, FDR≤0.05, q≥0.02)
+(cytoreason.cc.client::run_function_dist(retrive_me,my_object=nw_bulk_pruned_mat,image="eu.gcr.io/cytoreason/ci-cytoreason.ccm.pipeline-package:develop_0.55.1")) # wf-2f4bc1c967
+get_workflow_progress(c('wf-2f4bc1c967')) # SUCCEEDED
+nw_bulk_pruned_mat <- readRDS(get_workflow_outputs("wf-2f4bc1c967"))
+
+# Adjusted:
+adj_wf_res <- get_workflow_outputs("wf-3f29f6bb93")
+adj_wf_outputs_0.45 <- readRDS(adj_wf_res['igraph_NW_sub_0.45.rds',1])
+nw_adj_pruned_0.45 = igraph::as_data_frame(adj_wf_outputs_0.45, what = "edges")
+colnames(nw_adj_pruned_0.45)[colnames(nw_adj_pruned_0.45) %in% "from"] <- "var1"
+colnames(nw_adj_pruned_0.45)[colnames(nw_adj_pruned_0.45) %in% "to"] <- "var2"
+
+cyto_cc_push_object(nw_adj_pruned_0.45,"ra_nw_adjusted_pruned_0.45") 
+#wf-
+
+```
+
+</details>
+
+# 3 -- network preparation for cataloging
+
+<details>
+
+<summary>full bulk network cataloging</summary>
+
+### full bulk network
+
+```{r, echo = T, eval = FALSE}
+
+#get full bulk AD correlation network
+
+bulk_network_wid <- "wf-be39e4f377"
+
+#generate parquet file for the network
+
+(wf <- run_function_dist(function(net){
+    edges <- net[["edge_meta"]]
+    arrow::write_parquet(edges, "output/edges.parquet")
+    tools::md5sum("output/edges.parquet")
+    
+  },
+  net = input_wf_output_file(bulk_network_wid, "0", "output.rds", load = TRUE),
+  image = "eu.gcr.io/cytoreason/ci-cytoreason.ccm.pipeline-package:feature_AO_329_data_flow_latest",
+  force_execution = FALSE,
+  replace_image_tags = FALSE,
+  memory_request = '30Gi'
+))
+wf <- "wf-3104da6087"
+get_workflow_progress(c('wf-3104da6087')) # SUCCEEDED
+
+# Shiran's:
+#"wf-9dbc212a37"
+
+```
+
+</details>
+
+<details>
+
+<summary>pruned bulk network cataloging</summary>
+
+### pruned bulk network
+
+pruning includes the following cutoffs: - filter fdr\<0.05, - Chochrane's Q \> 0.02 - testing a range of correlation cutoffs. The optimal correlation cut point is the highest possible cutoff that preserves the majority of nodes and minimize the number of edges. (see network generation)
+
+```{r}
+
+
+#prune by selected cutoffs using the catalog functions
+nw_sub_sub <- cr_catalog_get_table(
+  catalog="cr-d73dacdf0e", 
+  name="edges", 
+    subset= ~ sub_type %in% "full",
+   filter= ~
+    cor >= 0 & 
+    fdr <= 0.05 &
+  q_pvalue >= 0.02
+  )
+
+cyto_cc_push_object(nw_sub_sub,"bulk_nw_pruned") 
+#wf-7c63d75bef
+
+
+#catalog the pruned network
+
+wf_nw_bulk_0.5_pruned <- run_function_dist(function(net){
+    edges <- net
+    arrow::write_parquet(edges, "output/edges.parquet")
+    tools::md5sum("output/edges.parquet")
+    
+  },
+  net =nw_sub_sub,
+  image = "eu.gcr.io/cytoreason/ci-cytoreason.ccm.pipeline-package:feature_AO_329_data_flow_latest",
+  force_execution = FALSE,
+  replace_image_tags = FALSE,
+  memory_request = '3Gi'
+  )
+
+wf_nw_bulk_0.5_pruned <- "wf-41537ec141"
+
+```
+
+</details>
+
+<details>
+
+<summary>full adjusted network cataloging</summary>
+
+### full adjusted network 
+
+```{r}
+
+
+#get full adjusted AD correlation network post filtering of 4 datasets
+
+adjusted_network_wid <- "wf-8f618e80d4"
+
+#generate parquet file for the network
+
+wf <- run_function_dist(function(net){
+    edges <- net[["edge_meta"]]
+    arrow::write_parquet(edges, "output/edges.parquet")
+    tools::md5sum("output/edges.parquet")
+    
+  },
+  net = input_wf_output_file(adjusted_network_wid, "0", "output.rds", load = TRUE),
+  image = "eu.gcr.io/cytoreason/ci-cytoreason.ccm.pipeline-package:feature_AO_329_data_flow_latest",
+  force_execution = FALSE,
+  replace_image_tags = FALSE,
+  memory_request = '30Gi'
+  )
+
+wf <- "wf-b71633040a"
+```
+
+</details>
+
+<details>
+
+<summary>pruned adjusted network cataloging</summary>
+
+### pruned adjusted network
+
+```{r }
+#prune by the selected cutoffs from the calatog
+
+adj_nw_sub_sub <- cr_catalog_get_table(
+  catalog="cr-332f2c5e7c", 
+  name="edges", 
+    subset= ~ sub_type %in% "full",
+   filter= ~
+    cor >= 0.55 & 
+    fdr <= 0.05 &
+  q_pvalue >= 0.02
+  )
+cyto_cc_push_object(adj_nw_sub_sub,"adj_nw_pruned") 
+
+#wf-b2c8f284f5
+
+#catalog the pruned network
+
+wf_nw_adj_0.55_pruned <- run_function_dist(function(net){
+    edges <- net
+    arrow::write_parquet(edges, "output/edges.parquet")
+    tools::md5sum("output/edges.parquet")
+  },
+  net =adj_nw_sub_sub,
+  image = "eu.gcr.io/cytoreason/ci-cytoreason.ccm.pipeline-package:feature_AO_329_data_flow_latest",
+  force_execution = FALSE,
+  replace_image_tags = FALSE,
+  memory_request = '3Gi'
+  )
+
+wf_nw_adj_0.55_pruned <- "wf-7c9cead349"
+
+```
+
+</details>
+
+<details>
+
+<summary>nodes with centrality of pruned bulk network</summary>
+
+### nodes with centrality of pruned bulk network
+
+```{r}
+
+nw_bulk_pruned_wf <- "wf-7186ad6e84"
+#nw_bulk_pruned <- readRDS(get_workflow_outputs(nw_bulk_pruned_wf))
+results <-  get_workflow_outputs(nw_bulk_pruned_wf)
+
+# Get the centrality based on r≥0.5 cutoff:
+nw_bulk_pruned <- readRDS(results['igraph_NW_sub_0.5.rds',1])
+nw_bulk_pruned <- igraph::as_data_frame(nw_bulk_pruned)
+colnames(nw_bulk_pruned)[colnames(nw_bulk_pruned) %in% "from"] <- "var1"
+colnames(nw_bulk_pruned)[colnames(nw_bulk_pruned) %in% "to"] <- "var2"
+
+wfid <- run_method_dist(method="centrality_measures",
+                        ns="analysis.codename",
+                        edges=nw_bulk_pruned[,c("var1","var2")],
+                        memory_request='5Gi',
+                        image="eu.gcr.io/cytoreason/ci-analysis.codename-package:adi_latest")
+#wf-b6545da8d9
+get_workflow_progress(c('wf-b6545da8d9')) # SUCCEEDED
+
+# Get the centrality based on r≥0.1 cutoff:
+nw_bulk_pruned_0_1 <- readRDS(results['igraph_NW_sub_0.1.rds',1])
+nw_bulk_pruned_0_1 <- igraph::as_data_frame(nw_bulk_pruned_0_1)
+colnames(nw_bulk_pruned_0_1)[colnames(nw_bulk_pruned_0_1) %in% "from"] <- "var1"
+colnames(nw_bulk_pruned_0_1)[colnames(nw_bulk_pruned_0_1) %in% "to"] <- "var2"
+
+(wfid <- run_method_dist(method="centrality_measures",
+                        ns="analysis.codename",
+                        edges=nw_bulk_pruned_0_1[,c("var1","var2")],
+                        memory_request='5Gi',
+                      image="eu.gcr.io/cytoreason/ci-analysis.codename-package:adi_latest"))
+#wf-6027ae3d46
+get_workflow_progress(c('wf-6027ae3d46')) # RUNNING
+
+# Shiran's:
+#wf-d535848bea
+
+centrality_wf <- "wf-b6545da8d9" # r≥0.5
+centrality_df <- readRDS(get_workflow_outputs(centrality_wf))
+
+RA_nw_bulk_pruned_0.5_degree_hist <- ggplot(centrality_df, aes(x = degree)) +
+  geom_histogram(binwidth = 0.005, fill = "skyblue", color = "black") +
+  labs(title = paste0("Degree distribution - RA network: FDR<0.05, q>0.02, r>0.5"),
+       x = "Node degree",
+       y = "No. nodes") +
+  theme_minimal()+
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14),
+    legend.position = "none",
+    plot.title = element_text(size = 10, hjust = 0.5,face='bold'))
+ggsave(paste0("~/capsule/scratch/RA_network/RA_pruned_degree_distribution.pdf"), plot = RA_nw_bulk_pruned_0.5_degree_hist)
+
+RA_nw_bulk_pruned_0.5_eigen_centrality_hist <- ggplot(centrality_df, aes(x = eigen_centrality)) +
+  geom_histogram(binwidth = 0.05, fill = "skyblue", color = "black") +
+  labs(title = paste0("Eigen centrality distribution - RA network: FDR<0.05, q>0.02, r>0.5"),
+       x = "Node eigen centrality",
+       y = "No. nodes") +
+  theme_minimal()+
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14),
+    legend.position = "none",
+    plot.title = element_text(size = 10, hjust = 0.5,face='bold'))
+ggsave(paste0("~/capsule/scratch/RA_network/RA_pruned_eigen_centrality_distribution.pdf"), plot = RA_nw_bulk_pruned_0.5_eigen_centrality_hist)
+
+RA_nw_bulk_pruned_0.5_betweenness_hist <- ggplot(centrality_df, aes(x = betweenness)) +
+  geom_histogram(binwidth = 0.0005, fill = "skyblue", color = "black") +
+  labs(title = paste0("Betweenness distribution - RA network: FDR<0.05, q>0.02, r>0.5"),
+       x = "Node betweenness",
+       y = "No. nodes") +
+  theme_minimal()+
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14),
+    legend.position = "none",
+    plot.title = element_text(size = 10, hjust = 0.5,face='bold'))
+ggsave(paste0("~/capsule/scratch/RA_network/RA_pruned_betweenness_distribution.pdf"), plot = RA_nw_bulk_pruned_0.5_betweenness_hist)
+
+RA_nw_bulk_pruned_0.5_page_rank_hist <- ggplot(centrality_df, aes(x = page_rank)) +
+  geom_histogram(binwidth = 0.00005, fill = "skyblue", color = "black") +
+  labs(title = paste0("Page rank distribution - RA network: FDR<0.05, q>0.02, r>0.5"),
+       x = "Node page rank",
+       y = "No. nodes") +
+  theme_minimal()+
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14),
+    legend.position = "none",
+    plot.title = element_text(size = 10, hjust = 0.5,face='bold'))
+ggsave(paste0("~/capsule/scratch/RA_network/RA_pruned_page_rank_distribution.pdf"), plot = RA_nw_bulk_pruned_0.5_page_rank_hist)
+
+RA_nw_bulk_pruned_0.5_closeness_hist <- ggplot(centrality_df, aes(x = closeness)) +
+  geom_histogram(binwidth = 0.0005, fill = "skyblue", color = "black") +
+  labs(title = paste0("Closeness distribution - RA network: FDR<0.05, q>0.02, r>0.5"),
+       x = "Node closeness",
+       y = "No. nodes") +
+  theme_minimal()+
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14),
+    legend.position = "none",
+    plot.title = element_text(size = 10, hjust = 0.5,face='bold'))
+ggsave(paste0("~/capsule/scratch/RA_network/RA_pruned_closeness_distribution.pdf"), plot = RA_nw_bulk_pruned_0.5_closeness_hist)
+
+### Check max distance (for unweighted network)
+# igraph object
+nw_bulk_pruned_graph <- igraph::graph_from_data_frame(d=nw_bulk_pruned, directed = FALSE)
+
+# pairwise distances
+gene_gene_distances <- igraph::distances(nw_bulk_pruned_graph, mode = "all", algorithm = "unweighted")
+
+# maximum distance
+max_distance <- max(gene_gene_distances[gene_gene_distances != Inf])  # Exclude infinite values (if there are disconnected components)
+print(max_distance)  # results show 9
+
+# Get the centrality based on r≥0.45 cutoff:
+nw_bulk_pruned_0.45 <- readRDS(results['igraph_NW_sub_0.45.rds',1])
+nw_bulk_pruned_0.45 <- igraph::as_data_frame(nw_bulk_pruned_0.45)
+colnames(nw_bulk_pruned_0.45)[colnames(nw_bulk_pruned_0.45) %in% "from"] <- "var1"
+colnames(nw_bulk_pruned_0.45)[colnames(nw_bulk_pruned_0.45) %in% "to"] <- "var2"
+
+wfid <- run_method_dist(method="centrality_measures",
+                        ns="analysis.codename",
+                        edges=nw_bulk_pruned_0.45[,c("var1","var2")],
+                        memory_request='5Gi',
+                        image="eu.gcr.io/cytoreason/ci-analysis.codename-package:adi_latest")
+#wf-8e2f7018a4
+get_workflow_progress(c('wf-8e2f7018a4')) # SUCCEEDED
+
+centrality_wf <- "wf-8e2f7018a4" # r≥0.45
+centrality_df <- readRDS(get_workflow_outputs(centrality_wf))
+
+RA_nw_bulk_pruned_0.45_degree_hist <- ggplot(centrality_df, aes(x = degree)) +
+  geom_histogram(binwidth = 0.005, fill = "skyblue", color = "black") +
+  labs(title = paste0("Degree distribution - RA network: FDR<0.05, q>0.02, r>0.45"),
+       x = "Node degree",
+       y = "No. nodes") +
+  theme_minimal()+
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14),
+    legend.position = "none",
+    plot.title = element_text(size = 10, hjust = 0.5,face='bold'))
+ggsave(paste0("~/capsule/scratch/RA_network/RA_pruned_degree_distribution_r_0_45.pdf"), plot = RA_nw_bulk_pruned_0.45_degree_hist)
+
+RA_nw_bulk_pruned_0.45_eigen_centrality_hist <- ggplot(centrality_df, aes(x = eigen_centrality)) +
+  geom_histogram(binwidth = 0.05, fill = "skyblue", color = "black") +
+  labs(title = paste0("Eigen centrality distribution - RA network: FDR<0.05, q>0.02, r>0.45"),
+       x = "Node eigen centrality",
+       y = "No. nodes") +
+  theme_minimal()+
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14),
+    legend.position = "none",
+    plot.title = element_text(size = 10, hjust = 0.5,face='bold'))
+ggsave(paste0("~/capsule/scratch/RA_network/RA_pruned_eigen_centrality_distribution_0_45.pdf"), plot = RA_nw_bulk_pruned_0.45_eigen_centrality_hist)
+
+RA_nw_bulk_pruned_0.45_betweenness_hist <- ggplot(centrality_df, aes(x = betweenness)) +
+  geom_histogram(binwidth = 0.0005, fill = "skyblue", color = "black") +
+  labs(title = paste0("Betweenness distribution - RA network: FDR<0.05, q>0.02, r>0.45"),
+       x = "Node betweenness",
+       y = "No. nodes") +
+  theme_minimal()+
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14),
+    legend.position = "none",
+    plot.title = element_text(size = 10, hjust = 0.5,face='bold'))
+ggsave(paste0("~/capsule/scratch/RA_network/RA_pruned_betweenness_distribution_0_45.pdf"), plot = RA_nw_bulk_pruned_0.45_betweenness_hist)
+
+RA_nw_bulk_pruned_0.45_page_rank_hist <- ggplot(centrality_df, aes(x = page_rank)) +
+  geom_histogram(binwidth = 0.00005, fill = "skyblue", color = "black") +
+  labs(title = paste0("Page rank distribution - RA network: FDR<0.05, q>0.02, r>0.45"),
+       x = "Node page rank",
+       y = "No. nodes") +
+  theme_minimal()+
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14),
+    legend.position = "none",
+    plot.title = element_text(size = 10, hjust = 0.5,face='bold'))
+ggsave(paste0("~/capsule/scratch/RA_network/RA_pruned_page_rank_distribution_0_45.pdf"), plot = RA_nw_bulk_pruned_0.45_page_rank_hist)
+
+RA_nw_bulk_pruned_0.45_closeness_hist <- ggplot(centrality_df, aes(x = closeness)) +
+  geom_histogram(binwidth = 0.005, fill = "skyblue", color = "black") +
+  labs(title = paste0("Closeness distribution - RA network: FDR<0.05, q>0.02, r>0.45"),
+       x = "Node closeness",
+       y = "No. nodes") +
+  theme_minimal()+
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14),
+    legend.position = "none",
+    plot.title = element_text(size = 10, hjust = 0.5,face='bold'))
+ggsave(paste0("~/capsule/scratch/RA_network/RA_pruned_closeness_distribution_0_45.pdf"), plot = RA_nw_bulk_pruned_0.45_closeness_hist)
+
+
+
+
+```
+
+### Test if the centrality of bio. expected genes for RA are central more than random
+```{r}
+# Function to calculate significance for a gene list mean centrality:
+test_list_mean_centrality <- function(DM="RA",cor_cut=0.5,centrality_df=centrality_df_0.5,gene_list_collection=list(RA_bio_exp=RA_bio_exp),n_rand_lists=1000){
+  library(org.Hs.eg.db)
+  library(dplyr)
+  centrality_res <- lapply(seq_along(gene_list_collection),function(gs){
+    gene_list_name <- names(gene_list_collection)[gs]
+    gene_list <- gene_list_collection[[gs]]
+    # Check how many genes from list are in the network:
+    gene_list_size <- length(gene_list)
+    gene_list_genes_in_nw <- intersect(centrality_df$feature_id,gene_list)
+    n_gene_list_genes_in_nw <- length(gene_list_genes_in_nw)
+    prop_gene_list_genes_in_nw <- n_gene_list_genes_in_nw/gene_list_size
+    # 
+    centrality_df[["gene_list_name"]] <- gene_list_name
+    centrality_df[["in_gene_list"]] <- ifelse(centrality_df$feature_id%in%gene_list,"yes","no")
+    centrality_df[["cor_cutoff"]] <- cor_cut
+    centrality_df[["DM"]] <- DM
+    centrality_df[["SYMBOL"]] <- AnnotationDbi::select(org.Hs.eg.db,keys = as.character(centrality_df$feature_id),columns = c("SYMBOL"),keytype = "ENTREZID")$SYMBOL
+    # Convert the centrality df to a long format:
+    centrality_df_long <- reshape2::melt(centrality_df[,c("DM","cor_cutoff","feature_id","SYMBOL","gene_list_name","in_gene_list","betweenness","degree","closeness","eigen_centrality","page_rank")],id.vars = c("DM","cor_cutoff","feature_id","SYMBOL","gene_list_name","in_gene_list"),value.name="centrality_value",variable.name="centrality_measure")
+    #
+    # Add a rank column (for visualization...):
+    centrality_df_long <- as.data.frame(centrality_df_long %>%
+    group_by(DM,cor_cutoff, centrality_measure) %>%   # Group by cor_cutoff and centrality_measure
+    mutate(centrality_rank = row_number(centrality_value)) %>% # will give each gene a unique rank value (even though the centrality value is the same - need that for visualization...) - in ascending order...
+      mutate(centrality_rank_with_ties = dense_rank(centrality_value)) %>% # create a rank column (in ascending order) that consider ties - will get the same rank...
+    ungroup())
+    #
+    # Split the centrality df to gene list genes and all the rest:
+    gene_list_centrality_df <- centrality_df_long[centrality_df_long$in_gene_list=="yes",]
+    not_gene_list_centrality_df <- centrality_df_long[centrality_df_long$in_gene_list=="no",]
+    not_gene_list_genes <- unique(not_gene_list_centrality_df$feature_id)
+    #
+    # Generate random gene lists:
+    set.seed(123)
+    r_lists <- replicate(n_rand_lists, sample(not_gene_list_genes,size=n_gene_list_genes_in_nw,replace=FALSE), simplify = FALSE)
+    names(r_lists) <- as.character(1:n_rand_lists)
+    mean_centrality <- lapply(as.character(unique(gene_list_centrality_df$centrality_measure)),function(m){ # per centrality measure, calculate observed and random mean centralities
+      m_observed_centrality <- mean(gene_list_centrality_df[gene_list_centrality_df$centrality_measure==m,"centrality_value"])
+      m_random_centralities <- sapply(r_lists, function(list){mean(not_gene_list_centrality_df[not_gene_list_centrality_df$centrality_measure==m&not_gene_list_centrality_df$feature_id%in%list,"centrality_value"])})
+      n_more_central_lists <- sum(m_random_centralities>=m_observed_centrality)
+      p_value <- n_more_central_lists/n_rand_lists
+      list(summary_df=data.frame(DM=DM,cor_cutoff=cor_cut,centrality_measure=m,gene_list_name=gene_list_name,gene_list_size=gene_list_size,n_gene_list_genes_in_nw=n_gene_list_genes_in_nw,gene_list_mean_centrality=m_observed_centrality,n_rand_lists=n_rand_lists,n_more_central_lists=n_more_central_lists,p_value=p_value),gene_list_and_random_mean_values=data.frame(DM=DM,cor_cutoff=cor_cut,centrality_measure=m,gene_list_name=gene_list_name,gene_list_type=c("observed",rep("random",n_rand_lists)),mean_centrality=c(m_observed_centrality,m_random_centralities)))
+    })
+    summary_df <- do.call(rbind,lapply(mean_centrality,`[[`,"summary_df"))
+    gene_list_and_random_mean_values <- do.call(rbind,lapply(mean_centrality,`[[`,"gene_list_and_random_mean_values"))
+    return(list(summary_df=summary_df,gene_list_and_random_mean_values=gene_list_and_random_mean_values,centrality_table=centrality_df_long))
+  })
+  # Combined results from different gene lists
+  summary_df <- do.call(rbind,lapply(centrality_res,`[[`,"summary_df"))
+  gene_list_and_random_mean_values <- do.call(rbind,lapply(centrality_res,`[[`,"gene_list_and_random_mean_values"))
+  centrality_table <- do.call(rbind,lapply(centrality_res,`[[`,"centrality_table"))
+  return(list(summary_df=summary_df,gene_list_and_random_mean_values=gene_list_and_random_mean_values,centrality_table=centrality_table))
+}
+
+# Bio. exp. list from Zhana (Merck-II project):
+Bio_exp_genes_from_Zhana_4_DMs <- read.delim("~/capsule/scratch/Bio_exp_genes_from_Zhana_4_DMs.txt",sep="\t",header=T)
+RA_bio_exp <- subset(Bio_exp_genes_from_Zhana_4_DMs,Disease=="RA")
+RA_bio_exp$EntrezID <- as.character(RA_bio_exp$EntrezID)
+#(cytoreason.cc.client::run_function_dist(retrive_me,my_object=RA_bio_exp,image="eu.gcr.io/cytoreason/ci-cytoreason.ccm.pipeline-package:develop_0.55.1")) # wf-f8425cf41d # SUCCEEDED
+RA_bio_exp <- readRDS(get_workflow_outputs("wf-f8425cf41d"))
+RA_bio_exp <- RA_bio_exp$EntrezID
+
+# Bio. exp. list from Nir (Pfizer 2024 Q1 project):
+CustomGeneList <- as.data.frame(readxl::read_xlsx("~/capsule/scratch/Features_CrossDZ_TargetsBioExp_with_more_stim.xlsx",sheet = "Bio_exp_longformat"))
+#RA_bio_exp <- as.character(CustomGeneList[CustomGeneList$Identifier=="RA_bio_exp","EntrezID"])
+RA_bio_exp <- CustomGeneList[CustomGeneList$Identifier=="RA_bio_exp",]
+#(cytoreason.cc.client::run_function_dist(retrive_me,my_object=RA_bio_exp,image="eu.gcr.io/cytoreason/ci-cytoreason.ccm.pipeline-package:develop_0.55.1")) # wf-eae82e42c9 # SUCCEEDED
+RA_bio_exp <- readRDS(get_workflow_outputs("wf-eae82e42c9"))
+RA_bio_exp <- RA_bio_exp$EntrezID
+
+centrality_df_0.5 <- readRDS(get_workflow_outputs("wf-b6545da8d9"))
+centrality_df_0.45 <- readRDS(get_workflow_outputs("wf-8e2f7018a4"))
+
+#mean_centrality_res_0.5 <- test_list_mean_centrality(DM="RA",cor_cut=0.5,centrality_df=centrality_df_0.5,gene_list=RA_bio_exp,n_rand_lists=10000)
+(mean_centrality_res_0.5_wf <- cytoreason.cc.client::run_function_dist(test_list_mean_centrality,DM="RA",cor_cut=0.5,centrality_df=centrality_df_0.5,gene_list_collection=list(RA_bio_exp=RA_bio_exp),n_rand_lists=10000,image="eu.gcr.io/cytoreason/ci-cytoreason.ccm.pipeline-package:develop_0.55.1")) # wf-5683a84d97
+get_workflow_progress(c('wf-5683a84d97')) # SUCCEEDED
+mean_centrality_res_0.5 <- readRDS(get_workflow_outputs("wf-5683a84d97"))
+
+
+#mean_centrality_res_0.45 <- test_list_mean_centrality(DM="RA",cor_cut=0.45,centrality_df=centrality_df_0.5,gene_list=RA_bio_exp,n_rand_lists=10000)
+(mean_centrality_res_0.45_wf <- cytoreason.cc.client::run_function_dist(test_list_mean_centrality,DM="RA",cor_cut=0.45,centrality_df=centrality_df_0.45,gene_list_collection=list(RA_bio_exp=RA_bio_exp),n_rand_lists=10000,image="eu.gcr.io/cytoreason/ci-cytoreason.ccm.pipeline-package:develop_0.55.1")) # wf-801edfe10a
+get_workflow_progress(c('wf-801edfe10a')) # SUCCEEDED
+mean_centrality_res_0.45 <- readRDS(get_workflow_outputs("wf-801edfe10a"))
+
+bq_perform_upload(bq_table("cytoreason","p01_proj_target_signatures_combinations_ra",table="RA_network_bio_exp_mean_centrality_summary"),rbind(mean_centrality_res_0.5$summary_df,mean_centrality_res_0.45$summary_df))
+bq_perform_upload(bq_table("cytoreason","p01_proj_target_signatures_combinations_ranking_ra",table="RA_network_bio_exp_mean_centrality_summary"),rbind(mean_centrality_res_0.5$summary_df,mean_centrality_res_0.45$summary_df))
+
+bq_perform_upload(bq_table("cytoreason","p01_proj_target_signatures_combinations_ra",table="RA_network_bio_exp_and_random_mean_centrality"),rbind(mean_centrality_res_0.5$gene_list_and_random_mean_values,mean_centrality_res_0.45$gene_list_and_random_mean_values))
+bq_perform_upload(bq_table("cytoreason","p01_proj_target_signatures_combinations_ranking_ra",table="RA_network_bio_exp_and_random_mean_centrality"),rbind(mean_centrality_res_0.5$gene_list_and_random_mean_values,mean_centrality_res_0.45$gene_list_and_random_mean_values))
+
+
+bq_perform_upload(bq_table("cytoreason","p01_proj_target_signatures_combinations_ra",table="RA_network_centrality_table"),rbind(mean_centrality_res_0.5$centrality_table,mean_centrality_res_0.45$centrality_table))
+bq_perform_upload(bq_table("cytoreason","p01_proj_target_signatures_combinations_ranking_ra",table="RA_network_centrality_table"),rbind(mean_centrality_res_0.5$centrality_table,mean_centrality_res_0.45$centrality_table))
+
+
+```
+
+### Test if the intra-density of bio. expected pathways are more than random
+```{r}
+
+# Function to calculate intra-density per list:
+intra_perturbation_density <- function(cor_mat,
+                                       edge_cutoff=0.5,
+                                       min_bin_size=100L,
+                                       signatures,
+                                       n_rand_lists=1000L,
+                                       n_cores=1L){
+  #
+  on.exit(gc())
+  #### Process inputs and check input validity:
+  #
+  library(checkmate)
+  library(parallel)
+  library(org.Hs.eg.db)
+  library(stats)
+  library(withr)
+  library(tibble)
+  library(dplyr)
+  #
+  #### Functions:
+  # Function to filter the network:
+  net_filter <- function(net, edge_cutoff=0.5, edge_cutoff_abs=FALSE) {
+    on.exit(gc())
+    net_filtered <- net
+    if(!is.na(edge_cutoff)) {
+      if (!edge_cutoff_abs) {
+        if(sign(edge_cutoff) >= 0) {
+          net_filtered[net_filtered < edge_cutoff] <- 0
+        } else {
+          net_filtered[net_filtered > edge_cutoff] <- 0
+        }
+      } else {
+        net_filtered[net_filtered < abs(edge_cutoff) & net_filtered > -abs(edge_cutoff)] <- 0
+      }
+    }
+    diag(net_filtered) <- 0
+    return(net_filtered)
+  }
+  #
+  # Function to calculate the degree per node, and group the nodes into bins with similar degree:
+  net_degree_bins <- function(net, min_bin_size=100) {
+    on.exit(gc())
+    net[net != 0] <- 1
+    pos_edge_degree <- apply(net, 2, sum)
+    pos_edge_degree_sorted <- sort(pos_edge_degree, decreasing = TRUE)
+    degree_df <- tibble::tibble(node = names(pos_edge_degree_sorted), degree = pos_edge_degree_sorted)
+    #
+    create_bins <- function(df, min_size) {
+      bins <- list()
+      current_bin <- data.frame()
+      for(i in seq_len(nrow(df))) {
+        current_bin <- dplyr::bind_rows(current_bin, df[i, ])
+        if (i == nrow(df) || df[["degree"]][1] != df[["degree"]][i + 1]) {
+          if (nrow(current_bin) >= min_size || i == nrow(df)) {
+            bins <- c(bins,list(current_bin))
+            current_bin <- data.frame()
+          }
+        }
+      }
+      return(bins)
+    }
+    #
+    initial_bins <- create_bins(degree_df, min_bin_size)
+    bin_df <- dplyr::bind_rows(initial_bins, .id = "bin_id") %>%
+      dplyr::group_by(.data[["bin_id"]]) %>%
+      dplyr::mutate(min_degree = min(.data[["degree"]]), max_degree = max(.data[["degree"]])) %>%
+      dplyr::ungroup() %>%
+      dplyr::select(bin_id = .data[["bin_id"]], node_id = .data[["node"]], node_degree = .data[["degree"]], min_degree = .data[["min_degree"]], max_degree = .data[["max_degree"]])
+    #
+    return(bin_df)
+  }
+  # Function to sample a random list with same size and degree distribution:
+  sample_rand_list_with_same_degree <- function(signature_bin_degree_distribution, other_genes_degree_bin_df) {
+    # convert the table object to a dataframe:
+    bin_distribution_df <- data.frame(
+      bin_id = names(signature_bin_degree_distribution),
+      count = as.numeric(signature_bin_degree_distribution),
+      stringsAsFactors = FALSE
+    )
+    #
+    # Order the bin_id in descending order:
+    bin_distribution_df <- bin_distribution_df %>%
+      dplyr::arrange(dplyr::desc(as.numeric(bin_id)))
+    #
+    remaining_to_sample <- 0
+    sampled_genes <- lapply(1:nrow(bin_distribution_df), function(i) {
+      bin_id <- as.character(bin_distribution_df[,"bin_id"][i])
+      count <- bin_distribution_df[,"count"][i] + remaining_to_sample
+      bin_genes <- other_genes_degree_bin_df %>% dplyr::filter(.data[["bin_id"]] == !!bin_id) %>% dplyr::pull(.data[["node_id"]])
+      if(length(bin_genes) >= count) {
+        sampled <- sample(bin_genes, count, replace = FALSE)
+        remaining_to_sample <<- 0
+      } else {
+        sampled <- bin_genes
+        remaining_to_sample <<- count - length(bin_genes)
+      }
+      return(sampled)
+    })
+    return(unlist(sampled_genes))
+  }
+  #
+  # Function to generate random lists per mono signature with same size and degree distribution:
+  generate_random_lists <- function(signatures, net_degree_bin_df, n_rand_lists,n_cores) {
+    on.exit(gc())
+    mclapply(names(signatures),function(m){
+      mono_genes <- signatures[[m]]
+      mono_degree_df <- net_degree_bin_df[net_degree_bin_df$node_id %in% mono_genes,]
+      mono_bin_degree_distribution <- table(mono_degree_df[,"bin_id"])
+      #
+      other_genes_net_degree_bin_df <- net_degree_bin_df[!(net_degree_bin_df$node_id %in% mono_genes), ]
+      set.seed(123)
+      random_lists <- replicate(n_rand_lists, sample_rand_list_with_same_degree(mono_bin_degree_distribution, other_genes_net_degree_bin_df), simplify = FALSE)
+      names(random_lists) <- as.character(1:n_rand_lists)
+      return(random_lists)
+    }, mc.cores = n_cores)
+  }
+  # Assumes a filtered network with 0 (no edge) or 1 (edge) values:
+  subnetwork_density <- function(net, gene_set) {
+    subnetwork <- net[gene_set, gene_set]
+    n_nodes <- length(gene_set)
+    actual_edges <- sum(subnetwork) / 2
+    potential_edges <- (n_nodes * (n_nodes - 1)) / 2
+    return(actual_edges / potential_edges)
+  }
+  #
+  ####
+  # Check the cor_mat:
+  if (!test_multi_class(cor_mat, c("matrix", "data.frame"))) {
+    stop("cor_mat must be a matrix or a data frame. Row and column names are gene ids.")
+  }
+  cor_mat <- as.matrix(cor_mat) # Network correlation matrix
+  assert_matrix(cor_mat,any.missing = TRUE,row.names = "unique",mode = "numeric")
+  assert_set_equal(rownames(cor_mat), colnames(cor_mat))
+  # Check if edge_cutoff is numeric if provided:
+  assert_number(edge_cutoff, na.ok = TRUE)
+  # Check that min_bin_size is a positive integer:
+  assert_int(min_bin_size, lower = 1L)
+  # Check that signatures is a list:
+  assert_list(signatures,names = "unique")
+  assert(!any(grepl("__", names(signatures))), "Some perturbation names contain '__' (the expected seperator between two mono names), which is not allowed for downstream processing.")
+  #
+  # Check that n_rand_lists is a positive integer:
+  assert_int(n_rand_lists, lower = 1L)
+  # Check that the n_cores is a positive integer:
+  assert_int(n_cores, lower = 1L)
+  #
+  #####
+  #
+  withr::local_options(list(stringsAsFactors = FALSE))
+  #
+  # Filter the signatures to only genes that are in the cor_mat network:
+  signatures_filtered <- lapply(signatures, intersect, rownames(cor_mat))
+  #
+  # Divide the nodes in the network into bins with similar node degree values (for randomization test)
+  # Filter the network based on an edge cutoff (generating three options: pos/neg/abs):
+  pos_net <- net_filter(cor_mat, abs(edge_cutoff), FALSE)
+  pos_net[is.na(pos_net)] <- 0
+  pos_net[pos_net!=0] <- 1
+  #
+  neg_net <- net_filter(net=cor_mat,edge_cutoff=-abs(edge_cutoff),edge_cutoff_abs=FALSE)
+  neg_net[is.na(neg_net)] <- 0 # Convert NA to 0 (no connection)
+  neg_net[neg_net!=0] <- 1 # define connection as 1 (currently not using weighted network...)
+  #
+  abs_net <- net_filter(net=cor_mat,edge_cutoff=abs(edge_cutoff),edge_cutoff_abs=TRUE)
+  abs_net[is.na(abs_net)] <- 0 # Convert NA to 0 (no connection)
+  abs_net[abs_net!=0] <- 1 # define connection as 1 (currently not using weighted network...)
+  #
+  # Generate degree distributions for positive, negative and absolute edge cutoffs
+  # (each will be used to calculate pos/neg/abs intra-density):
+  pos_net_degree_bin_df <- net_degree_bins(pos_net, min_bin_size)
+  neg_net_degree_bin_df <- net_degree_bins(net=neg_net,min_bin_size=min_bin_size)
+  abs_net_degree_bin_df <- net_degree_bins(net=abs_net,min_bin_size=min_bin_size)
+  #
+  # Generate random lists per mono signature (shared across combos) with same size and degree distribution (for randomization test):
+  mono_random_sigatures_pos_degree <- generate_random_lists(signatures=signatures_filtered, pos_net_degree_bin_df, n_rand_lists,n_cores)
+  names(mono_random_sigatures_pos_degree) <- names(signatures_filtered)
+  #
+  mono_random_sigatures_neg_degree <- generate_random_lists(signatures=signatures_filtered,net_degree_bin_df=neg_net_degree_bin_df,n_rand_lists=n_rand_lists,n_cores)
+  names(mono_random_sigatures_neg_degree) <- names(signatures_filtered)
+  #
+  mono_random_sigatures_abs_degree <- generate_random_lists(signatures=signatures_filtered,net_degree_bin_df=abs_net_degree_bin_df,n_rand_lists=n_rand_lists,n_cores)
+  names(mono_random_sigatures_abs_degree) <- names(signatures_filtered)
+  #
+  # Calculate the density of each mono (add to the output of relevant combinations):
+  mono_density <- mclapply(names(signatures_filtered),function(s){
+    signature_full_size <- length(signatures[[s]])
+    n_gene_list_genes_in_nw <- length(signatures_filtered[[s]])
+    signature_genes <- signatures_filtered[[s]]
+    n_potential_edges <- n_gene_list_genes_in_nw*(n_gene_list_genes_in_nw-1)/2
+    signature_genes_symb <- AnnotationDbi::select(org.Hs.eg.db,keys = as.character(signature_genes),columns = c("SYMBOL"),keytype = "ENTREZID")[["SYMBOL"]]
+    pos_density <- subnetwork_density(net=pos_net,gene_set=signature_genes)
+    neg_density <- subnetwork_density(net=neg_net,gene_set=signature_genes)
+    abs_density <- subnetwork_density(net=abs_net,gene_set=signature_genes)
+    # Run randomization test:
+    # Get the random lists:
+    r_pos_list <- mono_random_sigatures_pos_degree[[s]]
+    r_neg_list <- mono_random_sigatures_neg_degree[[s]]
+    r_abs_list <- mono_random_sigatures_abs_degree[[s]]
+    # Calculate density for random lists:
+    r_pos_density <- sapply(r_pos_list, function(genes) subnetwork_density(net=pos_net, gene_set=genes))
+    r_neg_density <- sapply(r_neg_list, function(genes) subnetwork_density(net=neg_net, gene_set=genes))
+    r_abs_density <- sapply(r_abs_list, function(genes) subnetwork_density(net=abs_net, gene_set=genes))
+    # Calculate pvalue:
+    pos_density_pvalue <- sum(r_pos_density>=pos_density)/length(r_pos_density)
+    neg_density_pvalue <- sum(r_neg_density>=neg_density)/length(r_neg_density)
+    abs_density_pvalue <- sum(r_abs_density>=abs_density)/length(r_abs_density)
+    #
+    # Return the same column names as the combo/bin density df to combine and calculate FDR:
+    return(data.frame(edge_cutoff=edge_cutoff,
+                      list_name=s,
+                      list_size=signature_full_size,
+                      n_list_genes_in_nw=n_gene_list_genes_in_nw,
+                      list_genes=paste0(signature_genes_symb,collapse=";"),
+                      n_potential_edges=n_potential_edges,
+                      n_positive_edges=pos_density*n_potential_edges,
+                      n_negative_edges=neg_density*n_potential_edges,
+                      n_abs_edges=abs_density*n_potential_edges,
+                      #
+                      positive_intra_density=pos_density,
+                      positive_intra_density_pvalue=pos_density_pvalue,
+                      #
+                      negative_intra_density=neg_density,
+                      negative_intra_density_pvalue=neg_density_pvalue,
+                      #
+                      abs_intra_density=abs_density,
+                      abs_intra_density_pvalue=abs_density_pvalue,
+                      stringsAsFactors = FALSE))
+  }, mc.cores = n_cores)
+  gc()
+  mono_density <- do.call('rbind',mono_density)
+  #
+  # Combine the mono densities and the combo/bin densities to calculate FDR:
+  mono_density[["positive_intra_density_FDR"]] <- p.adjust(mono_density[,"positive_intra_density_pvalue"],method="BH")
+  mono_density[["negative_intra_density_FDR"]] <- p.adjust(mono_density[,"negative_intra_density_pvalue"],method="BH")
+  mono_density[["abs_intra_density_FDR"]] <- p.adjust(mono_density[,"abs_intra_density_pvalue"],method="BH")
+  # Add randomization info:
+  mono_density[["randomization_approach"]] <- paste0("Generate ",n_rand_lists," random lists per signature, from the network background, with same signature size and degree distribution")
+  mono_density[["n_rand_permutations"]] <- n_rand_lists
+  #
+  ####
+  return(mono_density)
+}
+
+# Function to extract correlation matrix from the CR disease model:
+# Added FDR and q_pvalue cutoffs (cor cutoff will be applied later...)
+get_disease_network_cor_mat <- function(NW_wf="wf-be39e4f377",fdr_cutoff=0.05,q_pvalue_cutoff=0.02){
+  library(cytoreason.cc.client)
+  library(reshape2)
+  full_cor_bulk_NW <- readRDS(get_task_outputs(NW_wf,"0"))
+  edge_meta <- full_cor_bulk_NW$edge_meta
+  edge_meta_filtered <- subset(edge_meta,fdr<=fdr_cutoff&q_pvalue>=q_pvalue_cutoff)
+  rm(full_cor_bulk_NW)
+  gc()
+  #
+  # Create pairwise correlation matrix
+  mat <- reshape2::dcast(edge_meta_filtered[, c("Var1", "Var2", "cor")], Var1 ~ Var2, value.var = "cor")
+  #mat <- reshape(edge_meta_filtered[, c("Var1", "Var2", "cor")], idvar = "Var1", timevar = "Var2", direction = "wide")
+  gc()
+  rownames(mat) <- mat[["Var1"]]
+  mat[["Var1"]] <- NULL
+  colnames(mat) <- gsub("cor.", "", colnames(mat))
+  mat <- as.matrix(mat)
+  gc()
+  #
+  # Ensure matrix has all unique row and column names
+  all_names <- union(rownames(mat), colnames(mat))
+  new_mat <- matrix(NA, nrow = length(all_names), ncol = length(all_names))
+  rownames(new_mat) <- colnames(new_mat) <- all_names
+  #
+  # Fill the new matrix with values from the original matrix
+  mat_df <- as.data.frame(as.table(mat), stringsAsFactors = FALSE)
+  new_mat[cbind(match(mat_df$Var1, all_names), match(mat_df$Var2, all_names))] <- mat_df$Freq
+  #
+  # Order rows and columns
+  new_mat <- new_mat[order(rownames(new_mat)), order(colnames(new_mat))]
+  mat <- as.matrix(new_mat)
+  diag(mat) <- 1
+  #
+  # Make the matrix symmetrical
+  make_symmetric <- function(mat) {
+    mat[lower.tri(mat)] <- t(mat)[lower.tri(mat)]
+    return(mat)
+  }
+  #
+  mat <- make_symmetric(mat)
+  return(mat)
+}
+
+## Use the bio expectation pathways that we used in Pfizer Q1 2024 to evaluate criteria:
+FeaturesTable_annotated <- readxl::read_xlsx("~/capsule/scratch/Features_CrossDZ_TargetsBioExp_with_more_stim.xlsx",sheet = "KeyFeatures")
+RA_bio_exp_pathways <- as.data.frame(subset(FeaturesTable_annotated,Disease=="RA"&Category=="BioExpectations"))
+RA_bio_exp_pathways <- RA_bio_exp_pathways %>% dplyr::filter(Collection %in% c("h","kegg","reactome")) 
+#(cytoreason.cc.client::run_function_dist(retrive_me,my_object=RA_bio_exp_pathways,image="eu.gcr.io/cytoreason/ci-cytoreason.ccm.pipeline-package:develop_0.55.1")) # wf-790d3a6b77 # SUCCEEDED
+RA_bio_exp_pathways <- readRDS(get_workflow_outputs("wf-790d3a6b77"))
+
+# Retrieve pathways:
+gs <- ccm_prepare_bio_entities("gene_set_collection") # get the genes for all public pathways and GO terms
+attributes(gs)$class = "list"
+public_collection <- gs$gene_set_collection[c("h","kegg","reactome")]
+public_collection <- lapply(names(public_collection),function(c){
+  pathways <- lapply(names(public_collection[[c]]),function(p){
+    public_collection[[c]][[p]]
+  })
+  names(pathways) <- names(public_collection[[c]])
+  return(pathways)
+})
+names(public_collection) <- names(gs$gene_set_collection[c("h","kegg","reactome")])
+
+# Get bio. exp. pathway gene lists:
+public_collection$h <- public_collection$h[subset(RA_bio_exp_pathways,Collection=="h")$Identifier]
+public_collection$kegg <- public_collection$kegg[subset(RA_bio_exp_pathways,Collection=="kegg")$Identifier]
+public_collection$reactome <- public_collection$reactome[subset(RA_bio_exp_pathways,Collection=="reactome")$Identifier]
+
+RA_bio_exp_pathways <- c(public_collection$h,public_collection$kegg,public_collection$reactome)
+#RA_bio_exp_pathways <- readRDS(get_task_inputs("wf-345feeb4da","0")[["signatures"]])
+
+# Full RA network:
+(wf_RA_full_cor_bulk_mat <- cytoreason.cc.client::run_function_dist(get_disease_network_cor_mat,
+                                                                     NW_wf="wf-be39e4f377",
+                                                                     fdr_cutoff=0.05,
+                                                                     q_pvalue_cutoff=0.02,
+                                                                     image="eu.gcr.io/cytoreason/ci-cytoreason.ccm.pipeline-package:develop_0.55.1",
+                                                                     memory_request='70Gi',
+                                                                     tags = list(list(name='project',value='p01-target_signatures_in_RA'),
+                                                                                 list(name='client',value='p01'),
+                                                                                 list(name='object_name',value='RA full cor bulk matrix in wide format, based on wf-be39e4f377 run, filtered based on fdr ≤ 0.05 and q_pvalue ≥ 0.02')),
+                                                                     force_execution = TRUE))
+# wf-54dd516f52 # SUCCEEDED
+get_workflow_progress(c('wf-54dd516f52'))
+RA_full_cor_bulk_mat <- readRDS(get_task_outputs('wf-54dd516f52',"0")) # RA bulk full cor matrix in wide format, based on wf-be39e4f377 run, filtered based on fdr ≤ 0.05 and q_pvalue ≥ 0.02
+
+## Run the intra_perturbation_density function:
+# For edge_cutoff 0.5
+(RA_bio_exp_pathways_intra_density_r_0.5 <- cytoreason.cc.client::run_function_dist(intra_perturbation_density,
+                                                                                   cor_mat=RA_full_cor_bulk_mat,
+                                                                                   edge_cutoff=0.5,
+                                                                                   min_bin_size=100L,
+                                                                                   signatures=RA_bio_exp_pathways,
+                                                                                   n_rand_lists=1000L,
+                                                                                   n_cores=1,
+                                                                                   memory_request='20Gi',
+                                                                                   image="eu.gcr.io/cytoreason/ci-cytoreason.single.cell.preprocessing-package:develop_latest",
+                                                                                  tags=list(list(name='project',value='p01-target_signatures_in_RA'),list(name='client',value='p01'),list(name='memory_request',value='20Gi'),list(name='image',value='eu.gcr.io/cytoreason/ci-cytoreason.single.cell.preprocessing-package:develop_latest'),list(name='object_name',value='Run intra_perturbation_density on the RA network and RA bio expected pathways')),
+                                                                                  force_execution = TRUE))
+# wf-345feeb4da # SUCCEEDED
+get_workflow_progress(c('wf-345feeb4da'))
+RA_bio_exp_pathways_intra_density_r_0.5 <- readRDS(get_task_outputs('wf-345feeb4da',"0"))
+
+
+# For edge_cutoff 0.45
+(RA_bio_exp_pathways_intra_density_r_0.45 <- cytoreason.cc.client::run_function_dist(intra_perturbation_density,
+                                                                                   cor_mat=RA_full_cor_bulk_mat,
+                                                                                   edge_cutoff=0.45,
+                                                                                   min_bin_size=100L,
+                                                                                   signatures=RA_bio_exp_pathways,
+                                                                                   n_rand_lists=1000L,
+                                                                                   n_cores=1,
+                                                                                   memory_request='20Gi',
+                                                                                   image="eu.gcr.io/cytoreason/ci-cytoreason.single.cell.preprocessing-package:develop_latest",
+                                                                                  tags=list(list(name='project',value='p01-target_signatures_in_RA'),list(name='client',value='p01'),list(name='memory_request',value='20Gi'),list(name='image',value='eu.gcr.io/cytoreason/ci-cytoreason.single.cell.preprocessing-package:develop_latest'),list(name='object_name',value='Run intra_perturbation_density on the RA network and RA bio expected pathways')),
+                                                                                  force_execution = TRUE))
+# wf-676b0455b0 # SUCCEEDED
+get_workflow_progress(c('wf-676b0455b0'))
+RA_bio_exp_pathways_intra_density_r_0.45 <- readRDS(get_task_outputs('wf-676b0455b0',"0"))
+
+
+# Upload to BQ:
+bq_perform_upload(bq_table("cytoreason","p01_proj_target_signatures_combinations_ranking_ra",table="RA_network_bio_exp_pathways_intra_density"),rbind(RA_bio_exp_pathways_intra_density_r_0.5,RA_bio_exp_pathways_intra_density_r_0.45))
+
+#### Negative controls - we took pathways that are specific to other tissues (not synovium):
+pathways_non_synovium_df <- read.csv("~/capsule/scratch/pathways_non_synovium.csv")
+#(cytoreason.cc.client::run_function_dist(retrive_me,my_object=pathways_non_synovium_df,image="eu.gcr.io/cytoreason/ci-cytoreason.ccm.pipeline-package:develop_0.55.1")) # wf-efd60f1e47 # SUCCEEDED
+pathways_non_synovium_df <- readRDS(get_workflow_outputs("wf-efd60f1e47"))
+
+# Get the genes:
+public_neg_collection <- gs$gene_set_collection[c("kegg","go.bp","go.cc")]
+public_neg_collection <- lapply(names(public_neg_collection),function(c){
+  pathways <- lapply(names(public_neg_collection[[c]]),function(p){
+    public_neg_collection[[c]][[p]]
+  })
+  names(pathways) <- names(public_neg_collection[[c]])
+  return(pathways)
+})
+names(public_neg_collection) <- names(gs$gene_set_collection[c("kegg","go.bp","go.cc")])
+
+# Get bio. exp. pathway gene lists:
+public_neg_collection$kegg <- public_neg_collection$kegg[subset(pathways_non_synovium_df,pathway_GO_or_KEGG=="KEGG")$pathway_name]
+public_neg_collection$go.bp <- public_neg_collection$go.bp[c("spermatogenesis")] # the "positive regulation of establishment of Sertoli cell barrier" is empty (no genes...) so I removed it...
+
+#public_neg_collection$go.cc <- public_neg_collection$go.cc[c("basal ectoplasmic specialization")] # only one gene ("57481")...
+
+RA_negative_bio_exp_pathways <- c(public_neg_collection$kegg,public_neg_collection$go.bp)
+#RA_negative_bio_exp_pathways <- readRDS(get_task_inputs("wf-a395037d7b","0")[["signatures"]])
+
+# For edge_cutoff 0.5
+(RA_negative_bio_exp_pathways_intra_density_r_0.5 <- cytoreason.cc.client::run_function_dist(intra_perturbation_density,
+                                                                                   cor_mat=RA_full_cor_bulk_mat,
+                                                                                   edge_cutoff=0.5,
+                                                                                   min_bin_size=100L,
+                                                                                   signatures=RA_negative_bio_exp_pathways,
+                                                                                   n_rand_lists=1000L,
+                                                                                   n_cores=5,
+                                                                                   memory_request='45Gi',
+                                                                                   cpu_request = '5000m',
+                                                                                   image="eu.gcr.io/cytoreason/ci-cytoreason.single.cell.preprocessing-package:develop_latest",
+                                                                                  tags=list(list(name='project',value='p01-target_signatures_in_RA'),list(name='client',value='p01'),list(name='memory_request',value='45Gi'),list(name='cpu_request',value='5000m'),list(name='image',value='eu.gcr.io/cytoreason/ci-cytoreason.single.cell.preprocessing-package:develop_latest'),list(name='object_name',value='Run intra_perturbation_density on the RA network and RA negative bio expected pathways')),
+                                                                                  force_execution = TRUE))
+# wf-a395037d7b # SUCCEEDED
+get_workflow_progress(c('wf-a395037d7b'))
+RA_negative_bio_exp_pathways_intra_density_r_0.5 <- readRDS(get_task_outputs('wf-a395037d7b',"0"))
+
+
+# For edge_cutoff 0.45
+(RA_negative_bio_exp_pathways_intra_density_r_0.45 <- cytoreason.cc.client::run_function_dist(intra_perturbation_density,
+                                                                                   cor_mat=RA_full_cor_bulk_mat,
+                                                                                   edge_cutoff=0.45,
+                                                                                   min_bin_size=100L,
+                                                                                   signatures=RA_negative_bio_exp_pathways,
+                                                                                   n_rand_lists=1000L,
+                                                                                   n_cores=1,
+                                                                                   memory_request='25Gi',
+                                                                                   image="eu.gcr.io/cytoreason/ci-cytoreason.single.cell.preprocessing-package:develop_latest",
+                                                                                  tags=list(list(name='project',value='p01-target_signatures_in_RA'),list(name='client',value='p01'),list(name='memory_request',value='25Gi'),list(name='image',value='eu.gcr.io/cytoreason/ci-cytoreason.single.cell.preprocessing-package:develop_latest'),list(name='object_name',value='Run intra_perturbation_density on the RA network and RA negative bio expected pathways')),
+                                                                                  force_execution = TRUE))
+# wf-3005cc3eec # SUCCEEDED
+get_workflow_progress(c('wf-3005cc3eec'))
+RA_negative_bio_exp_pathways_intra_density_r_0.45 <- readRDS(get_task_outputs('wf-3005cc3eec',"0"))
+
+
+# Combine results:
+RA_negative_bio_exp_pathways_intra_density_r_0.45_0.5 <- rbind(RA_negative_bio_exp_pathways_intra_density_r_0.5,RA_negative_bio_exp_pathways_intra_density_r_0.45)
+
+# Add tissue and collection per pathway:
+RA_negative_bio_exp_pathways_intra_density_r_0.45_0.5$relevant_tissue <- pathways_non_synovium_df$tissue[match(RA_negative_bio_exp_pathways_intra_density_r_0.45_0.5$list_name,pathways_non_synovium_df$pathway_name)]
+
+RA_negative_bio_exp_pathways_intra_density_r_0.45_0.5$collection <- pathways_non_synovium_df$pathway_GO_or_KEGG[match(RA_negative_bio_exp_pathways_intra_density_r_0.45_0.5$list_name,pathways_non_synovium_df$pathway_name)]
+
+# Upload to BQ:
+bq_perform_upload(bq_table("cytoreason","p01_proj_target_signatures_combinations_ranking_ra",table="RA_network_negative_bio_exp_pathways_intra_density"),RA_negative_bio_exp_pathways_intra_density_r_0.45_0.5)
+
+
+```
+
+### Test if the top DEGs (RA vs HC meta-analysis) are more central and more dense than random
+```{R}
+RA_gx_diff <- statistic_table(ra.ccm$meta$RA$gx_diff$gx_diff)
+RA_gx_diff <- subset(RA_gx_diff,term=="RA_vs_HC"&submodel%in%c("bulk","adjusted__1__1"))
+RA_gx_diff_significant <- RA_gx_diff[RA_gx_diff$fdr<=0.05,]
+RA_gx_diff_significant_bulk <- RA_gx_diff_significant[RA_gx_diff_significant$submodel=="bulk",]
+top_bulk_DEGs_up <- head(RA_gx_diff_significant_bulk[order(RA_gx_diff_significant_bulk$effect_size, decreasing = TRUE),]$feature_id,100)
+top_bulk_DEGs_down <- tail(RA_gx_diff_significant_bulk[order(RA_gx_diff_significant_bulk$effect_size, decreasing = TRUE),]$feature_id,100)
+top_DEGs_signatures <- list(top_bulk_DEGs_up=top_bulk_DEGs_up,top_bulk_DEGs_down=top_bulk_DEGs_down)
+(cytoreason.cc.client::run_function_dist(retrive_me,my_object=top_DEGs_signatures,image="eu.gcr.io/cytoreason/ci-cytoreason.ccm.pipeline-package:develop_0.55.1")) # wf-a6877657a3
+top_DEGs_signatures <- readRDS(get_workflow_outputs("wf-a6877657a3"))
+
+
+#### Mean centrality:
+# DEGs:
+(mean_centrality_DEGs_up_down_res_0.5_wf <- cytoreason.cc.client::run_function_dist(test_list_mean_centrality,DM="RA",cor_cut=0.5,centrality_df=centrality_df_0.5,gene_list_collection=top_DEGs_signatures,n_rand_lists=10000,image="eu.gcr.io/cytoreason/ci-cytoreason.ccm.pipeline-package:develop_0.55.1")) # wf-414dcabf67
+get_workflow_progress(c('wf-414dcabf67')) # SUCCEEDED
+mean_centrality_DEGs_up_down_res_0.5 <- readRDS(get_workflow_outputs("wf-414dcabf67"))
+
+(mean_centrality_DEGs_up_down_res_0.45_wf <- cytoreason.cc.client::run_function_dist(test_list_mean_centrality,DM="RA",cor_cut=0.45,centrality_df=centrality_df_0.45,gene_list_collection=top_DEGs_signatures,n_rand_lists=10000,image="eu.gcr.io/cytoreason/ci-cytoreason.ccm.pipeline-package:develop_0.55.1")) # wf-6e94790773
+get_workflow_progress(c('wf-6e94790773')) # SUCCEEDED
+mean_centrality_DEGs_up_down_res_0.45 <- readRDS(get_workflow_outputs("wf-6e94790773"))
+
+# Combine centrality results with previous results (the bio. exp. genes):
+# summary_df:
+mean_centrality_res_0.5$summary_df$list_type <- "positive_control"; mean_centrality_res_0.5$summary_df$evaluation_network <- "RA"
+mean_centrality_res_0.45$summary_df$list_type <- "positive_control"; mean_centrality_res_0.45$summary_df$evaluation_network <- "RA"
+mean_centrality_DEGs_up_down_res_0.5$summary_df$list_type <- "RA_vs_HC_top_DEGs"; mean_centrality_DEGs_up_down_res_0.5$summary_df$evaluation_network <- "RA"
+mean_centrality_DEGs_up_down_res_0.45$summary_df$list_type <- "RA_vs_HC_top_DEGs"; mean_centrality_DEGs_up_down_res_0.45$summary_df$evaluation_network <- "RA"
+
+RA_network_evaluation_mean_centrality_summary <- rbind(mean_centrality_res_0.5$summary_df,
+                                                       mean_centrality_res_0.45$summary_df,
+                                                       mean_centrality_DEGs_up_down_res_0.5$summary_df,
+                                                       mean_centrality_DEGs_up_down_res_0.45$summary_df)
+bq_perform_upload(bq_table("cytoreason","p01_proj_target_signatures_combinations_ra",table="RA_network_evaluation_mean_centrality_summary"),RA_network_evaluation_mean_centrality_summary)
+
+# gene_list_and_random_mean_values:
+mean_centrality_res_0.5$gene_list_and_random_mean_values$list_type <- "positive_control"; mean_centrality_res_0.5$gene_list_and_random_mean_values$evaluation_network <- "RA"
+mean_centrality_res_0.45$gene_list_and_random_mean_values$list_type <- "positive_control"; mean_centrality_res_0.45$gene_list_and_random_mean_values$evaluation_network <- "RA"
+mean_centrality_DEGs_up_down_res_0.5$gene_list_and_random_mean_values$list_type <- "RA_vs_HC_top_DEGs"; mean_centrality_DEGs_up_down_res_0.5$gene_list_and_random_mean_values$evaluation_network <- "RA"
+mean_centrality_DEGs_up_down_res_0.45$gene_list_and_random_mean_values$list_type <- "RA_vs_HC_top_DEGs"; mean_centrality_DEGs_up_down_res_0.45$gene_list_and_random_mean_values$evaluation_network <- "RA"
+
+RA_network_evaluation_random_mean_centrality <- rbind(mean_centrality_res_0.5$gene_list_and_random_mean_values,
+                                                      mean_centrality_res_0.45$gene_list_and_random_mean_values,
+                                                      mean_centrality_DEGs_up_down_res_0.5$gene_list_and_random_mean_values,
+                                                      mean_centrality_DEGs_up_down_res_0.45$gene_list_and_random_mean_values)
+
+bq_perform_upload(bq_table("cytoreason","p01_proj_target_signatures_combinations_ra",table="RA_network_evaluation_random_mean_centrality"),RA_network_evaluation_random_mean_centrality)
+
+# centrality_table:
+mean_centrality_res_0.5$centrality_table$list_type <- "positive_control"; mean_centrality_res_0.5$centrality_table$evaluation_network <- "RA"
+mean_centrality_res_0.45$centrality_table$list_type <- "positive_control"; mean_centrality_res_0.45$centrality_table$evaluation_network <- "RA"
+mean_centrality_DEGs_up_down_res_0.5$centrality_table$list_type <- "RA_vs_HC_top_DEGs"; mean_centrality_DEGs_up_down_res_0.5$centrality_table$evaluation_network <- "RA"
+mean_centrality_DEGs_up_down_res_0.45$centrality_table$list_type <- "RA_vs_HC_top_DEGs"; mean_centrality_DEGs_up_down_res_0.45$centrality_table$evaluation_network <- "RA"
+
+RA_network_evaluation_centrality_table <- rbind(mean_centrality_res_0.5$centrality_table,
+                                               mean_centrality_res_0.45$centrality_table,
+                                               mean_centrality_DEGs_up_down_res_0.5$centrality_table,
+                                               mean_centrality_DEGs_up_down_res_0.45$centrality_table)
+
+bq_perform_upload(bq_table("cytoreason","p01_proj_target_signatures_combinations_ra",table="RA_network_evaluation_centrality_table"),RA_network_evaluation_centrality_table)
+
+# Save these tables to cyto-cc (will combine them with the HC network later...):
+(cytoreason.cc.client::run_function_dist(retrive_me,my_object=RA_network_evaluation_mean_centrality_summary,image="eu.gcr.io/cytoreason/ci-cytoreason.ccm.pipeline-package:develop_0.55.1")) # wf-1697792e3c
+RA_network_evaluation_mean_centrality_summary <- readRDS(get_workflow_outputs("wf-1697792e3c"))
+
+(cytoreason.cc.client::run_function_dist(retrive_me,my_object=RA_network_evaluation_random_mean_centrality,image="eu.gcr.io/cytoreason/ci-cytoreason.ccm.pipeline-package:develop_0.55.1")) # wf-94fdea3ff6
+RA_network_evaluation_random_mean_centrality <- readRDS(get_workflow_outputs("wf-94fdea3ff6"))
+
+(cytoreason.cc.client::run_function_dist(retrive_me,my_object=RA_network_evaluation_centrality_table,image="eu.gcr.io/cytoreason/ci-cytoreason.ccm.pipeline-package:develop_0.55.1")) # wf-7ee923d45f
+RA_network_evaluation_centrality_table <- readRDS(get_workflow_outputs("wf-7ee923d45f"))
+
+#### Intra-density
+## Run the intra_perturbation_density function:
+
+# For edge_cutoff 0.5
+(RA_top_DEGs_intra_density_r_0.5 <- cytoreason.cc.client::run_function_dist(intra_perturbation_density,
+                                                                                   cor_mat=RA_full_cor_bulk_mat,
+                                                                                   edge_cutoff=0.5,
+                                                                                   min_bin_size=100L,
+                                                                                   signatures=top_DEGs_signatures,
+                                                                                   n_rand_lists=1000L,
+                                                                                   n_cores=1,
+                                                                                   memory_request='20Gi',
+                                                                                   image="eu.gcr.io/cytoreason/ci-cytoreason.single.cell.preprocessing-package:develop_latest",
+                                                                                  tags=list(list(name='project',value='p01-target_signatures_in_RA'),list(name='client',value='p01'),list(name='memory_request',value='20Gi'),list(name='image',value='eu.gcr.io/cytoreason/ci-cytoreason.single.cell.preprocessing-package:develop_latest'),list(name='object_name',value='Run intra_perturbation_density on the RA network and RA up and down top DEGs')),
+                                                                                  force_execution = TRUE))
+# wf-f753bb983b # SUCCEEDED
+get_workflow_progress(c('wf-f753bb983b'))
+RA_top_DEGs_intra_density_r_0.5 <- readRDS(get_task_outputs('wf-f753bb983b',"0"))
+
+# For edge_cutoff 0.45
+(RA_top_DEGs_intra_density_r_0.45 <- cytoreason.cc.client::run_function_dist(intra_perturbation_density,
+                                                                                   cor_mat=RA_full_cor_bulk_mat,
+                                                                                   edge_cutoff=0.45,
+                                                                                   min_bin_size=100L,
+                                                                                   signatures=top_DEGs_signatures,
+                                                                                   n_rand_lists=1000L,
+                                                                                   n_cores=1,
+                                                                                   memory_request='20Gi',
+                                                                                   image="eu.gcr.io/cytoreason/ci-cytoreason.single.cell.preprocessing-package:develop_latest",
+                                                                                  tags=list(list(name='project',value='p01-target_signatures_in_RA'),list(name='client',value='p01'),list(name='memory_request',value='20Gi'),list(name='image',value='eu.gcr.io/cytoreason/ci-cytoreason.single.cell.preprocessing-package:develop_latest'),list(name='object_name',value='Run intra_perturbation_density on the RA network and RA up and down top DEGs')),
+                                                                                  force_execution = TRUE))
+# wf-ade64fb4f3 # SUCCEEDED
+get_workflow_progress(c('wf-ade64fb4f3'))
+RA_top_DEGs_intra_density_r_0.45 <- readRDS(get_task_outputs('wf-ade64fb4f3',"0"))
+
+RA_top_DEGs_intra_density <- rbind(RA_top_DEGs_intra_density_r_0.5,RA_top_DEGs_intra_density_r_0.45)
+
+# Combine all the evaluation gene lists intra-density results together:
+RA_bio_exp_pathways_intra_density_r_0.5 <- RA_bio_exp_pathways_intra_density_r_0.5 %>%
+  dplyr::mutate(edge_cutoff = 0.5) %>%
+  dplyr::select(edge_cutoff, everything())
+
+RA_bio_exp_pathways_intra_density_r_0.45 <- RA_bio_exp_pathways_intra_density_r_0.45 %>%
+  dplyr::mutate(edge_cutoff = 0.45) %>%
+  dplyr::select(edge_cutoff, everything())
+
+RA_bio_exp_pathways_intra_density_r_0.5$list_type <- "positive_control"; RA_bio_exp_pathways_intra_density_r_0.5$evaluation_network <- "RA"
+RA_bio_exp_pathways_intra_density_r_0.45$list_type <- "positive_control"; RA_bio_exp_pathways_intra_density_r_0.45$evaluation_network <- "RA"
+RA_negative_bio_exp_pathways_intra_density_r_0.5$list_type <- "negative_control"; RA_negative_bio_exp_pathways_intra_density_r_0.5$evaluation_network <- "RA"
+RA_negative_bio_exp_pathways_intra_density_r_0.45$list_type <- "negative_control"; RA_negative_bio_exp_pathways_intra_density_r_0.45$evaluation_network <- "RA"
+RA_top_DEGs_intra_density_r_0.5$list_type <- "RA_vs_HC_top_DEGs"; RA_top_DEGs_intra_density_r_0.5$evaluation_network <- "RA"
+RA_top_DEGs_intra_density_r_0.45$list_type <- "RA_vs_HC_top_DEGs"; RA_top_DEGs_intra_density_r_0.45$evaluation_network <- "RA"
+
+RA_evaluation_pathways_intra_density <- rbind(RA_bio_exp_pathways_intra_density_r_0.5,
+                                              RA_bio_exp_pathways_intra_density_r_0.45,
+                                              RA_negative_bio_exp_pathways_intra_density_r_0.5,
+                                              RA_negative_bio_exp_pathways_intra_density_r_0.45,
+                                              RA_top_DEGs_intra_density_r_0.5,
+                                              RA_top_DEGs_intra_density_r_0.45)
+
+# Upload to BQ:
+bq_perform_upload(bq_table("cytoreason","p01_proj_target_signatures_combinations_ranking_ra",table="RA_network_evaluation_pathways_intra_density"),RA_evaluation_pathways_intra_density)
+
+
+
+```
+
+
+</details>
+
+<details>
+
+<summary>nodes with centrality of pruned adjusted network</summary>
+
+### nodes with centrality of pruned adjusted network
+
+```{r}
+
+nw_adj_pruned_wf <- "wf-3f29f6bb93"
+#nw_bulk_pruned <- readRDS(get_workflow_outputs(nw_bulk_pruned_wf))
+results <-  get_workflow_outputs(nw_adj_pruned_wf)
+nw_adj_pruned_0.45 <- readRDS(results['igraph_NW_sub_0.45.rds',1])
+nw_adj_pruned_0.45 <- igraph::as_data_frame(nw_adj_pruned_0.45)
+colnames(nw_adj_pruned_0.45)[colnames(nw_adj_pruned_0.45) %in% "from"] <- "var1"
+colnames(nw_adj_pruned_0.45)[colnames(nw_adj_pruned_0.45) %in% "to"] <- "var2"
+
+(wfid <- run_method_dist(method="centrality_measures",
+                        ns="analysis.codename",
+                        edges=nw_adj_pruned_0.45[,c("var1","var2")],
+                        memory_request='5Gi',
+                        image="eu.gcr.io/cytoreason/ci-analysis.codename-package:adi_latest"))
+
+#wf-61dacf4da7
+get_workflow_progress(c('wf-61dacf4da7')) # SUCCEEDED
+centrality_wf <- "wf-61dacf4da7"
+
+```
+
+
+
+### cluster the gene network into modules:
+```{R}
+#### Bulk:
+#RA_bulk_nw <- readRDS(get_workflow_outputs("wf-be39e4f377")) # the RA bulk network
+RA_bulk_nw_input <- get_task_inputs("wf-be39e4f377","0") # input used to generate the  RA bulk network
+gene_list <- readRDS(RA_bulk_nw_input[["gene_list"]])
+group_table <- readRDS(RA_bulk_nw_input[["group_table"]])
+assay_element <- readRDS(RA_bulk_nw_input[["assay_element"]])
+net_id <- readRDS(RA_bulk_nw_input[["net_id"]])
+esets <- readRDS(RA_bulk_nw_input[["esets"]])
+
+IMAGE <- "eu.gcr.io/cytoreason/ci-cytoreason.individual.variation-package:SUP_4695_1.2.0"
+
+# Run all network stages:
+(RA_network_WF <- run_method_dist("service_generate_modules",
+                                 ns = "cytoreason.individual.variation",
+                                 disease= "RA",
+                                 assay_element= "exprs",
+                                 #force_execution = FALSE,
+                                 #edges_obj = out$edges_obj,
+                                 #steps = c("full_corr_matrix"),
+                                 #full_corr_memory="900Gi",
+                                 steps = c("network", "modules", "meta-modules", "annotation"),
+                                 gene_list=gene_list,
+                                 esets=esets,
+                                 group_table=group_table,
+                                 edge_list.args = list(
+                                   min_n_genes = 10000,  #2000,
+                                   max_n_genes = 25000,  #was 8000 - maybe change back
+                                   qp_val = 0.02,
+                                   fdr_val=0.05,
+                                   #to_propagate=TRUE,
+                                   #info_propagate=NULL,
+                                   #fdr_propagate=0.001,
+                                   #edge_pruning_corr=c(0.5,0.525,0.55,0.6,0.65),  #bulk
+                                   #edge_pruning_corr=c(0.45,0.5,0.525,0.55),  #adj
+                                   #to_loo=TRUE,
+                                   #assay_element = NULL,
+                                   #lean_output=TRUE,
+                                   #net_id=NULL,
+                                   check_outlier=F,
+                                   #save_data_memory_request="20Gi",
+                                   internal_data_access="public", # cytoreason.cc.client:::default_data_access(),
+                                   def_data_specific_edges=list(cytocc=TRUE,memory_request='30Gi'),
+                                   #def_loo=list(memory_request='100Gi'),
+                                   def_edge_pruning=list(cytocc=TRUE,memory_request='30Gi')),
+                                 module.args = list(
+                                   find_cor_th = FALSE,
+                                   cor_th=0.45,
+                                   fdr_th=0.05,
+                                   q_th=0.02,
+                                   min_n_edges=10,   #10000,
+                                   max_n_edges=200000000,
+                                   min_clust = 3,
+                                   max_clust = 100,
+                                   pathway_collection=c("h","kegg","reactome", "btm","c2.cp"),
+                                   #net_id=NULL,
+                                   # lean_output=FALSE,
+                                  #IMAGE="eu.gcr.io/cytoreason/ci-cytoreason.individual.variation-package:develop_0.13.0",
+                                  internal_data_access="public", # cytoreason.cc.client:::default_data_access(),
+                                  to_enrichment_qc=TRUE,
+                                  to_cluster_stability=TRUE,
+                                  def_enrich_pathway=list(cytocc=FALSE,memory_request='6Mi', fdr=0.05),
+                                  def_enrich_BP=list(cytocc=FALSE,memory_request='6Mi', fdr=0.05),
+                                  def_cluster_modules_using_pathway=list(cytocc=FALSE,memory_request='6Mi'),
+                                  def_compute_measures=list(cytocc=FALSE,memory_request='6Mi'),
+                                  def_enrichment_qc=list(cytocc=TRUE,memory_request='20Gi',n_rand=100),
+                                  def_cluster_stability=list(cytocc=TRUE,memory_request='20Gi',n_rand=100,n_sub=100,seed_obs=123,seed_rand=1:100)
+                                  # coex_heatmap_edges_th=10
+                                  ),
+                                 # meta_modules.args = list(
+                                 #   #min_clust=5,
+                                 #   cor_th=0.5
+                                 # ),
+                                 memory_request_modules = "99Gi",
+                                 memory_request="99Gi",
+                                 image="eu.gcr.io/cytoreason/ci-cytoreason.individual.variation-package:SUP_4695_1.2.0",
+                                 image_modules="eu.gcr.io/cytoreason/ci-cytoreason.individual.variation-package:SUP_4695_1.2.0",
+                                 #image="eu.gcr.io/cytoreason/ci-cytoreason.individual.variation-package:master_1.1.9", # From Revital
+                                 #image_modules="eu.gcr.io/cytoreason/ci-cytoreason.individual.variation-package:master_1.1.9", # From Revital
+                                 tags=list(list(name="method", value="service_generate_modules"),
+                                           list(name="disease", value="RA"),
+                                           list(name="network_type", value="bulk"))))
+# wf-c22ca7d39a # SUCCEEDED # removed net_id - worked - produced modules
+get_workflow_progress(c('wf-c22ca7d39a'))
+RA_bulk_nw_with_modules <- readRDS(get_workflow_outputs("wf-c22ca7d39a")) # the RA bulk network
+
+#  pairwise distances
+gene_gene_distances <- igraph::distances(nw_bulk_pruned, mode = "all", algorithm = "unweighted")
+
+# maximum distance
+max_distance <- max(gene_gene_distances[gene_gene_distances != Inf])  # Exclude infinite values (if there are disconnected components)
+print(max_distance)  # results show 13
+
+
+#
+```
+
+</details>
+
+<details>
+
+<summary>Export network for Tableau</summary>
+
+### 4 -- export network for Tableau
+
+-- nw tables for dashboards are uploaded here:
+['https://console.cloud.google.com/bigquery?project=cytoreason&ws=!1m4!1m3!3m2!1scytoreason!2sp01_proj_target_signatures_combinations_ranking_ra']
+
+--  tables are linked to nw dashboard. can be found here:
+['https://analytics.cytoreason.com/#/site/p03/views/JNJmultispecificsinADv6/8_Targetnetworktopology']
+
+```{r}
+
+#load functions
+
+.makeEdgename = function(A,B){
+  A = as.numeric(A)
+  B = as.numeric(B)
+  list = sort(c(A,B))
+  return(paste0(list,collapse = "__"))
+}
+.foo_get_coordinates <- function(net) {
+  fr_lay <- layout_with_fr(net, weights = edge_attr(net, "cor"))
+  cr_lay <- layout_in_circle(net)
+  
+  data.frame(entrezid=sapply(strsplit(vertex_attr(net, "name"),"_"),"[",1),
+             x1_fr=fr_lay[,1],y1_fr=fr_lay[,2],
+             x1_cr=cr_lay[,1],y1_cr=cr_lay[,2], stringsAsFactors = FALSE)
+}
+
+
+# Define the Signature Table
+
+customSignatures <- read_asset("wf-13096e7be3")
+
+fullList = unlist(customSignatures, recursive = FALSE)
+names(fullList) = stringr::str_replace(names(fullList),"\\.","__")
+fullList <- fullList[!grepl("random", names(fullList))]
+
+fullList_df <- do.call('rbind', lapply(names(fullList), function(cur_geneset) {
+  data.frame(geneset=cur_geneset, entrezid=fullList[[cur_geneset]], stringsAsFactors = F)
+}))
+
+
+#convert signature list to dataframe
+GenesInSignature_longformat = stack(fullList)
+colnames(GenesInSignature_longformat) = c("entrezid","ListName")
+GenesInSignature_longformat$collection <- stringr::str_split(GenesInSignature_longformat$ListName,"__",simplify = TRUE)[,1]
+
+#use the full network as a reference to fix coordinates
+
+WF <- run_method_dist(method = "Export_signature_gene_coordinates_disease_nw_global",
+                      ns = "analysis.p03.POC1",
+                      #GenesInSignature_longformat = GenesInSignature_longformat_sub,
+                      wf_nw = "wf-be39e4f377", #full bulk disease nw
+                      #SignatureTable=SignatureTable_sub,
+                      cor_thr=0,
+                      image ="eu.gcr.io/cytoreason/ci-analysis.p03.poc1-package:shiran_API_latest",
+                      memory_request = '70Gi')
+#wf-d82bcebb73
+
+gene_coordinates <- read_asset("wf-d82bcebb73")
+gene_coordinates  <- gene_coordinates %>% dplyr::right_join(GenesInSignature_longformat)
+
+#add collection
+
+gene_coordinates <- gene_coordinates %>% 
+  dplyr::rename(Identifier=ListName)
+
+gene_coordinates$helper <- paste(gene_coordinates$Identifier, gene_coordinates$entrezid, sep="___")
+fullList_df$helper <- paste(fullList_df$geneset, fullList_df$entrezid, sep="___")
+gene_coordinates$in_signature <- ifelse(gene_coordinates$helper %in% fullList_df$helper, 1, 0)
+gene_coordinates$helper <- NULL
+
+cyto_cc_push_object(gene_coordinates,"gene_coordinates") 
+
+#wf-b8b22fc90d #september delivery
+#wf-64c45d7cbf #updated archs and custom genesets
+
+uploadToBQ(wfid = gene_coordinates, bqdataset = "p01_proj_target_signatures_combinations_ranking_ra", tableName = "network_gene_coordinates")
+
+bulk_disease_nw_wf <- "wf-109135546d"
+bulk_disease_nw <- read_asset(bulk_disease_nw_wf)
+
+### ConstructLongEdgeTable #####
+EdgeTable <-  data.frame()
+bulk_disease_nw <- bulk_disease_nw[!bulk_disease_nw$var1==bulk_disease_nw$var2,]
+
+bulk_edge.clean <-  bulk_disease_nw %>%
+  rowwise() %>%
+  dplyr::mutate(Edge = .makeEdgename(var1,var2)) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(Edge,cor) %>%
+  unique() %>%
+  dplyr::mutate(entrezid = str_split(Edge,"__")) %>%
+  unnest(entrezid) %>%
+  mutate( symbol =  AnnotationDbi::mapIds(org.Hs.eg.db,  entrezid, column = "SYMBOL", keytype = "ENTREZID", multiVals = "first")) %>%
+  dplyr::rename(cor = cor) %>%
+  left_join(gene_coordinates[,c("entrezid","symbol")]) %>%
+  dplyr::mutate(EdgeType = "RA.bulk") %>%
+  dplyr::mutate(version = bulk_disease_nw_wf)
+
+#the edges are duplicated because one of the nodes (var1/var2) appears multiple times in the gene_coordinates because it participates in more than one signature
+#take the unique
+
+bulk_edge.clean <- bulk_edge.clean %>% distinct()
+
+Genelist = gene_coordinates$entrezid
+
+archs_wf <- "wf-e8302f0ca4"
+graph <- readRDS(get_task_outputs(archs_wf, task_id = 0))
+archs_network <- graph_from_adjacency_matrix(graph, mode = "undirected", weighted = T, diag = F)
+
+archs_network <- igraph::as_data_frame(archs_network)
+
+#remove self edges
+
+#filter for r>=0.5 (according to Gil's optimization)
+#archs_network <- archs_network %>%
+#  dplyr::filter(weight >=0.5)
+
+#remove selsf edges
+archs_network <- archs_network %>%
+  dplyr::filter(from != to)
+colnames(archs_network) <- c("var1", "var2", "cor")  
+  
+archs_edge.clean <-  archs_network %>%
+  dplyr::filter(var1 %in%  Genelist) %>%
+  dplyr::filter(var2 %in%  Genelist) %>%
+  dplyr::select(var1,var2,cor) %>%
+  rowwise() %>%
+  dplyr::mutate(Edge = .makeEdgename(var1,var2)) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(Edge,cor) %>%
+  unique() %>%
+  dplyr::mutate(entrezid = str_split(Edge,"__")) %>%
+  unnest(entrezid) %>%
+  mutate( symbol =  mapIds(org.Hs.eg.db,  entrezid, column = "SYMBOL", keytype = "ENTREZID", multiVals = "first")) %>%
+  left_join(gene_coordinates[,c("entrezid","symbol")]) %>%
+  dplyr::mutate(EdgeType = "Archs4") %>%
+  dplyr::mutate(version = "v1")
+
+archs_edge.clean <- archs_edge.clean %>% distinct()
+
+adj_edge <- read_asset("wf-aeeeac9a85")
+adj_edge.clean = adj_edge %>%
+  dplyr::filter(var1 %in%  Genelist) %>%
+  dplyr::filter(var2 %in%  Genelist) %>%
+  dplyr::select(var1,var2,cor) %>%
+  rowwise() %>%
+  dplyr::mutate(Edge = .makeEdgename(var1,var2)) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(Edge,cor) %>%
+  unique() %>%
+  dplyr::mutate(entrezid = str_split(Edge,"__")) %>%
+  unnest(entrezid)  %>%
+  mutate( symbol =  mapIds(org.Hs.eg.db,  entrezid, column = "SYMBOL", keytype = "ENTREZID", multiVals = "first")) %>%
+  left_join(gene_coordinates[,c("entrezid","symbol")]) %>%
+  dplyr::mutate(EdgeType = "RA.adjusted") %>%
+  dplyr::mutate(version = "wf-aeeeac9a85")
+
+adj_edge.clean <- adj_edge.clean %>% distinct()
+
+EdgeTable_combined = rbind(archs_edge.clean,bulk_edge.clean,adj_edge.clean)
+cyto_cc_push_object(EdgeTable_combined,"EdgeTable_combined") 
+#wf-dc4914550d #september delivery
+#wf-e315350209 #updated archs and custom genesets
+
+uploadToBQ(wfid = EdgeTable_combined, bqdataset = "p01_proj_target_signatures_combinations_ranking_ra", tableName = "network_obj_edges_membership")
+
+
+#### Node Attributes ####
+#imputation is done for missing genes in the network
+
+BulkNodeScores <- read_asset("wf-b6545da8d9") #centrality measures bulk
+names(BulkNodeScores)[names(BulkNodeScores) %in% "feature_id"] <- "ENTREZID"
+BulkNodeScores = BulkNodeScores %>% 
+  dplyr::select(betweenness:page_rank,ENTREZID) %>%
+  dplyr::mutate(ENTREZID = as.character(ENTREZID)) %>%
+  unique() %>%
+  remove_rownames() %>%
+  dplyr::rename(entrezid = ENTREZID) %>%
+  dplyr::full_join(gene_coordinates[,c("entrezid","symbol")]) %>%
+  dplyr::filter(entrezid %in% gene_coordinates$entrezid) %>%
+  pivot_longer(cols = betweenness:page_rank,names_to = "parameter",values_to = "value") %>%
+  dplyr::mutate(parameter = str_remove(parameter,"node_")) %>%
+  dplyr::mutate(imputed = case_when(is.na(value) ~ "yes",
+                                    TRUE ~ "no")) %>%
+  dplyr::group_by(parameter) %>%
+  dplyr::mutate(valueImp = case_when(is.na(value) ~ (min(value,na.rm = TRUE)/2),
+                                     TRUE ~ value)) %>%
+  dplyr::mutate(adjusted = "no") %>%
+  dplyr::mutate(version = "wf-b6545da8d9")
+
+AdjNodeScores = read_asset("wf-61dacf4da7")
+names(AdjNodeScores)[names(AdjNodeScores) %in% "feature_id"] <- "ENTREZID"
+
+AdjNodeScores = AdjNodeScores %>% 
+  dplyr::select(betweenness:page_rank,ENTREZID) %>%
+  mutate(ENTREZID = as.character(ENTREZID)) %>%
+  unique() %>%
+  remove_rownames() %>%
+  dplyr::rename(entrezid = ENTREZID) %>%
+  full_join(gene_coordinates[,c("entrezid","symbol")]) %>%
+  dplyr::filter(entrezid %in% gene_coordinates$entrezid) %>%
+  pivot_longer(cols = betweenness:page_rank,names_to = "parameter",values_to = "value") %>%
+  dplyr::mutate(parameter = str_remove(parameter,"node_")) %>%
+  dplyr::mutate(imputed = case_when(is.na(value) ~ "yes",
+                                    TRUE ~ "no")) %>%
+  group_by(parameter) %>%
+  dplyr::mutate(valueImp = case_when(is.na(value) ~ (min(value,na.rm = TRUE)/2),
+                                     TRUE ~ value)) %>%
+  dplyr::mutate(adjusted = "yes") %>%
+  dplyr::mutate(version = "wf-61dacf4da7")
+
+NodeScores = rbind(BulkNodeScores,AdjNodeScores)
+
+NodeScores <- NodeScores[!NodeScores$parameter %in% "closeness",]
+
+NodeScores <- NodeScores %>% distinct()
+
+
+cyto_cc_push_object(NodeScores,"NodeScores") 
+#wf-beca2356e2 
+
+uploadToBQ(wfid = NodeScores, bqdataset = "p01_proj_target_signatures_combinations_ranking_ra", tableName = "network_node_attributes")
+
+
+```
+
+### 5 -- visualize signature subgraphs in html
+
+#### 5.1 visualize mono
+
+define inputs
+```{ r}
+
+#custom genesets
+#-----------------
+
+customSignatures <- read_asset("wf-13096e7be3") # top 50
+
+mono_genesets <- customSignatures$monotherapies
+
+```
+
+run visualization function
+``` {r}
+get_node_positions <- function(network) {
+  layout <- layout_with_fr(network)  # Fruchterman-Reingold layout for better visualization
+  positions <- data.frame(id = names(V(network)), x = layout[,1], y = layout[,2])
+  return(positions)
+}
+
+visualize_gene_set_subgraphs <- function(whole_network, gene_sets, centrality_df, centrality_measure = "betweenness") {
+  for (i in seq_along(gene_sets)) {
+    gene_set <- gene_sets[[i]]
+    gene_set <- gene_set[gene_set %in% names(V(whole_network))]
+    
+    node_positions <- get_node_positions(whole_network)
+    
+    vids_df <- which(V(whole_network)$name %in% gene_set)
+    # Create subgraph for the gene set
+    subgraph <- induced_subgraph(whole_network, vids = vids_df)
+    
+    # Extract node names from the subgraph
+    nodes <- V(subgraph)$name
+    
+    # Merge subgraph nodes with centrality measures
+    subgraph_centrality <- centrality_df %>%
+      dplyr::filter(feature_id %in% nodes) %>%
+      dplyr::arrange(feature_id)
+    
+    # Prepare data for visNetwork
+    nodes_df <- data.frame(
+      id = subgraph_centrality$feature_id,
+      label = subgraph_centrality$feature_id,
+      #color = scales::col_numeric("viridis", domain = NULL)(subgraph_centrality[[centrality_measure]])
+      color = scales::col_numeric(palette = c("#f0e3ab", "#f49d77", "#ce5f5f", "#b23030"), domain = NULL)(subgraph_centrality[[centrality_measure]]),
+      font.size = 32  # Increase font size
+    )
+    
+    # Add positions to nodes_df
+    nodes_df <- merge(nodes_df, node_positions, by = "id", all.x = TRUE)
+    
+    ann_df_gene_name <- mapIds(keys=as.character(nodes_df$id), x = org.Hs.eg.db, keytype = c("ENTREZID"), column = c("SYMBOL")) %>%
+      tibble::enframe(name = "ENTREZID", value = "SYMBOL")
+    ann_df_gene_name <- data.frame(ann_df_gene_name, stringsAsFactors = F)
+    
+    nodes_df$label <- ann_df_gene_name[match(nodes_df$id, ann_df_gene_name$ENTREZID),'SYMBOL']
+    
+    edges_df <- igraph::as_data_frame(subgraph, what = "edges")
+    
+    #edges_df$from <- ann_df_gene_name[match(edges_df$from, ann_df_gene_name$ENTREZID),'SYMBOL']
+    #edges_df$to <- ann_df_gene_name[match(edges_df$to, ann_df_gene_name$ENTREZID),'SYMBOL']
+    
+    vis_net <- visNetwork(nodes_df, edges_df) %>%
+      visNodes(font = list(size = 20)) %>%  # Increase font size
+      visEdges(color = list(color = "gray")) %>%
+      visOptions(highlightNearest = TRUE, nodesIdSelection = TRUE) %>%
+      visLayout(randomSeed = 123) %>%
+    visPhysics(stabilization = FALSE, 
+               solver = "barnesHut",
+               barnesHut = list(gravitationalConstant = -8000,
+                                centralGravity = 0.3,
+                                springLength = 100,
+                                springConstant = 0.04,
+                                damping = 0.09))  # Disable physics movement
+    
+    clean_name <- gsub("[^A-Za-z0-9_]", "",  names(gene_sets)[i])
+    
+    # Save visualization as HTML file
+    file_name <- paste0("Gene_Set_", clean_name, "_", centrality_measure, ".html")
+    visSave(vis_net, file = file_name)
+    cat("Saved visualization to", file_name, "\n")
+  }
+}
+
+
+visualize_gene_set_subgraphs(nw_bulk_pruned, mono_genesets, centrality_df, centrality_measure = "page_rank")
+
+
+
+```
+
+
+#### 5.2 visualize combo
+
+define inputs
+
+```{r }
+
+#custom genesets
+#-----------------
+
+customSignatures <- read_asset("wf-13096e7be3")
+combo_genesets <- customSignatures$dupiMono
+mono_genesets <- customSignatures$monotherapies
+
+#categorize genes to unique and overlapping
+#--------------------------------------------
+
+categorize_genes <- function(combo_name, combo_genesets, mono_genesets) {
+  
+  # Split combo_name into mono1 and mono2
+  mono1_name <- str_split(combo_name, "-")[[1]][1]
+  mono2_name <- str_split_fixed(combo_name, "-", 2)[2]
+  
+  # Replace "Dupi" with "Dupilumab-50" in mono names
+  mono1_name <- ifelse(mono1_name %in% "Dupi", "Dupilumab-50", mono1_name)
+  mono2_name <- ifelse(mono2_name %in% "Dupi", "Dupilumab-50", mono2_name)
+  
+  # Get mono therapy gene sets
+  mono1 <- mono_genesets[[mono1_name]]
+  mono2 <- mono_genesets[[mono2_name]]
+  
+  # Identify overlapping and unique genes
+  overlapping_genes <- intersect(mono1, mono2)
+  mono1_only <- mono1[!mono1 %in% overlapping_genes]
+  mono2_only <- mono2[!mono2 %in% overlapping_genes]
+  
+  # Create data frames for each category, even if empty
+  overlapping_genes_df <- if (length(overlapping_genes) > 0) {
+    data.frame(entrezid = overlapping_genes, mono_name="overlapping", type = "overlapping", stringsAsFactors = FALSE)
+  } else {
+    data.frame(entrezid = character(0), mono_name = character(0), type = character(0), stringsAsFactors = FALSE)
+  }
+  
+  mono1_only_df <- if (length(mono1_only) > 0) {
+    data.frame(entrezid = mono1_only, mono_name = mono1_name, type="mono_1", stringsAsFactors = FALSE)
+  } else {
+    data.frame(entrezid = character(0), mono_name = character(0), type=character(0), stringsAsFactors = FALSE)
+  }
+  
+  mono2_only_df <- if (length(mono2_only) > 0) {
+    data.frame(entrezid = mono2_only, mono_name = mono2_name, type="mono_2", stringsAsFactors = FALSE)
+  } else {
+    data.frame(entrezid = character(0), mono_name = character(0),type=character(0), stringsAsFactors = FALSE)
+  }
+  
+  # Combine the data frames
+  df <- rbind(mono1_only_df, mono2_only_df, overlapping_genes_df)
+  
+  return(df)
+}
+
+
+# Process all combination gene sets
+results_list <- lapply(names(combo_genesets), function(combo_name) {
+  categorize_genes(combo_name, combo_genesets, mono_genesets)
+})
+
+names(results_list) <- names(combo_genesets)
+
+combo_df <- do.call('rbind', lapply(names(results_list), function(cur_df) {
+  results_list[[cur_df]]$combo_name <- cur_df
+  return( results_list[[cur_df]])
+}))
+
+
+#import disease networks
+#-------------------------
+
+nw_bulk_pruned_wf <- "wf-7186ad6e84"
+#nw_bulk_pruned <- readRDS(get_workflow_outputs(nw_bulk_pruned_wf))
+results <-  get_workflow_outputs(nw_bulk_pruned_wf)
+nw_bulk_pruned <- readRDS(results['igraph_NW_sub_0.5.rds',1])
+#nw_bulk_pruned <- igraph::as_data_frame(nw_bulk_pruned)
+#colnames(nw_bulk_pruned)[colnames(nw_bulk_pruned) %in% "from"] <- "var1"
+#colnames(nw_bulk_pruned)[colnames(nw_bulk_pruned) %in% "to"] <- "var2"
+
+#get precomputed gene level centrality
+#--------------------------------------
+centrality_df <- read_asset("wf-b6545da8d9")
+
+```
+
+
+run visualization
+```{r }
+
+#### visualize combo ####
+#define function
+
+get_node_positions <- function(network) {
+  layout <- layout_with_fr(network)  # Fruchterman-Reingold layout for better visualization
+  positions <- data.frame(id = names(V(network)), x = layout[,1], y = layout[,2])
+  return(positions)
+}
+
+visualize_gene_set_subgraphs <- function(whole_network, gene_sets, centrality_df, final_results, centrality_measure = "betweenness") {
+  # Initialize lists to store edges and nodes data frames for each gene set
+  edges_list <- list()
+  nodes_list <- list()
+  
+  for (i in seq_along(gene_sets)) {
+    gene_set_name <- names(gene_sets)[i]
+    gene_set <- gene_sets[[i]]
+    gene_set <- gene_set[gene_set %in% names(V(whole_network))]  # Filter genes present in the network
+    
+    node_positions <- get_node_positions(whole_network)
+    
+    vids_df <- which(V(whole_network)$name %in% gene_set)
+    subgraph <- induced_subgraph(whole_network, vids = vids_df)
+    nodes <- V(subgraph)$name
+    
+    # Merge subgraph nodes with centrality measures
+    subgraph_centrality <- centrality_df %>%
+      dplyr::filter(feature_id %in% nodes) %>%
+      dplyr::arrange(feature_id)
+    
+    # Use the categorized gene results to assign color categories, filter by the current combo_name
+    
+    final_results_sub <- final_results[final_results$combo_name %in% gene_set_name,]
+    gene_categories <- final_results_sub %>%
+      dplyr::filter(entrezid %in% nodes, combo_name == gene_set_name)
+    
+    # Assign colors based on the category (mono1_only, mono2_only, overlapping)
+    nodes_df <- data.frame(
+      id = gene_set, 
+      stringsAsFactors = FALSE
+    )
+    
+    nodes_df$type <- gene_categories[match(nodes_df$id, gene_categories$entrezid), 'type']
+    nodes_df$label <- gene_categories[match(nodes_df$id, gene_categories$entrezid), 'mono_name']
+    
+    nodes_df$color <- ifelse(nodes_df$type %in% "overlapping", "#FFDDC1", 
+                             ifelse(nodes_df$type %in% "mono_1", "#88CCEE", 
+                                    ifelse(nodes_df$type %in% "mono_2", "#6495ED", NA)))
+    nodes_df$font.size <- 32
+    
+    # Add positions to nodes_df
+    nodes_df <- merge(nodes_df, node_positions, by = "id", all.x = TRUE)
+    
+    # Annotate gene names using org.Hs.eg.db for human genes
+    ann_df_gene_name <- AnnotationDbi::mapIds(keys = as.character(nodes_df$id), x = org.Hs.eg.db, keytype = "ENTREZID", column = "SYMBOL") %>%
+      tibble::enframe(name = "ENTREZID", value = "SYMBOL")
+    ann_df_gene_name <- data.frame(ann_df_gene_name, stringsAsFactors = FALSE)
+    
+    nodes_df$label <- ann_df_gene_name[match(nodes_df$id, ann_df_gene_name$ENTREZID), 'SYMBOL']
+    
+    # Extract edges
+    edges_df <- igraph::as_data_frame(subgraph, what = "edges")
+    
+    # Define intra-mono and inter-mono edges based on mono1_only and mono2_only
+    edges_df$from_type <- final_results_sub[match(edges_df$from, final_results_sub$entrezid), 'type']
+    edges_df$to_type <- final_results_sub[match(edges_df$to, final_results_sub$entrezid), 'type']
+    
+    edges_df$from_to_type <- paste(edges_df$from_type, edges_df$to_type, sep = "__")
+    
+    edges_df <- edges_df %>%
+      dplyr::mutate(edge_type = ifelse((from_to_type %in% "mono_1__mono_2") | (from_to_type %in% "mono_2__mono_1"), "inter_mono",
+                                       ifelse((from_to_type %in% "mono_1__mono_1") | (from_to_type %in% "mono_2__mono_2"), "intra_mono",
+                                              "other")))  # Edge within either mono1_only or mono2_only
+    
+    # Set different colors for intra and inter edges
+    edges_df$color <- ifelse(edges_df$edge_type == "inter_mono", "red", 
+                             ifelse(edges_df$edge_type == "intra_mono", "blue", "grey"))
+    edges_df$label_to <- nodes_df[match(edges_df$to, nodes_df$id),'label']
+    edges_df$label_from <- nodes_df[match(edges_df$from, nodes_df$id),'label']
+     
+    edges_df$from_mono_label <- final_results_sub[match(edges_df$from, final_results_sub$entrezid),'mono_name']
+    edges_df$to_mono_label <- final_results_sub[match(edges_df$to, final_results_sub$entrezid),'mono_name']
+    
+    # Save edges_df and nodes_df for the current gene set
+    edges_list[[gene_set_name]] <- edges_df
+    nodes_list[[gene_set_name]] <- nodes_df
+    
+    # Visualization using visNetwork (optional)
+    vis_net <- visNetwork(nodes_df, edges_df) %>%
+      visNodes(font = list(size = 45)) %>%
+      visEdges(color = list(color = edges_df$color)) %>%
+      visOptions(highlightNearest = TRUE, nodesIdSelection = TRUE) %>%
+      visLayout(randomSeed = 123) %>%
+      visPhysics(stabilization = FALSE,
+             solver = "barnesHut",
+             barnesHut = list(gravitationalConstant = -3000,  # Weaker gravitational constant
+                              centralGravity = 0.9,  # Much stronger central pull
+                              springLength = 20,  # Even shorter spring length
+                              springConstant = 0.02,  # Slightly weaker springs to prevent too much clustering
+                              damping = 0.1))  # Keep damping moderate
+    
+    clean_name <- gsub("[^A-Za-z0-9_]", "", gene_set_name)
+    
+    # Save visualization as HTML file
+    file_name <- paste0("Gene_Set_", clean_name, "_", centrality_measure, ".html")
+    visSave(vis_net, file = file_name)
+    cat("Saved visualization to", file_name, "\n")
+  }
+  
+  # Return the lists of edges_df and nodes_df
+  return(list(edges = edges_list, nodes = nodes_list))
+}
+
+res_nw <- visualize_gene_set_subgraphs(nw_bulk_pruned, combo_genesets, centrality_df, final_results=combo_df , centrality_measure = "page_rank")
+
+
+edge_df <- do.call('rbind', lapply(names(res_nw$edges), function(cur_comb) {
+  res_nw$edges[[cur_comb]]$geneset <- cur_comb
+  return(res_nw$edges[[cur_comb]])
+}))
+
+write.csv(edge_df, "~/scratch/subgraphs/combo_modified/edge_df.csv")
+cyto_cc_push_object(edge_df,"nw_edge_df")
+#wf-f64f0f0be5
+
+```
+
+```{r render, include = FALSE}
+if( FALSE ){
+  rmarkdown::render("~/code/p03-POC1-analysis/notes/API/new_interface/notebooks/Catalog_project_specific_model.Rmd")
+  
+}
+```
