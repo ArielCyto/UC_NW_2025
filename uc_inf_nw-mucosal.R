@@ -180,7 +180,7 @@ nets = consume_workflow_task_output(wf = edge_meta_res[["edge_meta"]][["wf_id"]]
 # use case 2: postprocess on previous orchestrated_edge_pruning results
 
 # See orchestrated_edge_pruning doc for details regarding parameters 
-prune <- c("min_abs_corr" = 0.55, "max_fdr" = 0.05, "min_q_fdr" = 0.05)
+prune <- c("min_abs_corr" = 0.6, "max_fdr" = 0.05, "min_q_fdr" = 0.05)
 corr_direction <- "none"
 subset_gene_list <- NULL
 min_connected_component <- NULL
@@ -217,7 +217,7 @@ nw_measures <-
 
 get_workflow(nw_measures, wait = TRUE)
 nw_measures_res <- readRDS(get_task_outputs(nw_measures, task_id = 0, files_names_grepl_pattern = "output.rds"))
-head(nw_measures_res)
-write.csv(nw_measures_res, '~/UC_NW_2025/outputs/inf_mucosal_nw_measures_res_0.55.csv')
+#head(nw_measures_res)
+write.csv(nw_measures_res, '~/UC_NW_2025/outputs/inf_mucosal_nw_measures_res_0.6.csv')
 
 
