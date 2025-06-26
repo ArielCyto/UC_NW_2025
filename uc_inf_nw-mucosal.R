@@ -5,6 +5,19 @@ library("cytoreason.individual.variation")
 library(cytoreason.validator.apps.client)
 library(cytoreason.cc.client)
 library(Hmisc)
+library(stringr)
+library(dplyr)
+library(checkmate)
+library(testthat)
+library(scales)
+library(igraph)
+library(visNetwork)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(patchwork)
+library(ggplot2)
+source("~/UC_NW_2025/Vis_functions.R")
+
 .get_esets_ccm <- function(ccmfit, esets_names=NULL) {
   if (is.null(esets_names)) {
     esets_names <- names(ccmfit$datasets)
@@ -159,9 +172,9 @@ pruning_info_wfid <-
   memory_request = default_memory_request,
   force_execution = FALSE, replace_image_tags = TRUE, 
   tags = list(list("name" = "NW_notebook", "value" =  "edge_pruning_analysis")))
+# wf-08d37a2968
 
-
-get_workflow(pruning_info_wfid, wait = TRUE)
+#get_workflow(pruning_info_wfid, wait = TRUE)
 pruning_info <- get_outputs_dist('wf-08d37a2968')$output.rds$edge_pruning_info
 p_nodes(pruning_info)
 p_edges(pruning_info)
@@ -170,6 +183,18 @@ p_paretofront(pruning_info)
 if (!is.null(important_genes)){
   p_important_genes(pruning_info)
 }
+# print and check
+unique(pruning_info$num_nodes[pruning_info$min_corr_threshold == '0.6'])
+unique(pruning_info$num_nodes[pruning_info$min_corr_threshold == '0.55'])
+unique(pruning_info$num_nodes[pruning_info$min_corr_threshold == '0.5'])
+
+unique(pruning_info$num_edges[pruning_info$min_corr_threshold == '0.6'])
+unique(pruning_info$num_edges[pruning_info$min_corr_threshold == '0.55'])
+unique(pruning_info$num_edges[pruning_info$min_corr_threshold == '0.5'])
+
+length(unique(pruning_info$node_measures.components[pruning_info$min_corr_threshold == '0.6']));
+length(unique(pruning_info$node_measures.components[pruning_info$min_corr_threshold == '0.55']));
+length(unique(pruning_info$node_measures.components[pruning_info$min_corr_threshold == '0.5']));
 
 ##### Step 5
 # use case 1: postprocess edge meta output
@@ -198,7 +223,9 @@ post_processes_nw <-
                     force_execution = FALSE, replace_image_tags = TRUE, 
                     tags = list(list("name" = "NW_notebook", "value" = "orchestrated_edge_pruning")))
 
-# https://cyto-cc.cytoreason.com/workflow/wf-5ee339dc90
+# https://cyto-cc.cytoreason.com/workflow/wf-c3b19c53be
+# wf-ae634ffd00
+post_processes_nw <- readRDS(get_task_outputs('wf-c3b19c53be', task_id = 0, files_names_grepl_pattern = "output.rds"))
 
 nw_measures <- 
   run_function_dist(function(nets, ...) {
@@ -215,9 +242,99 @@ nw_measures <-
   tags = list(list("name" = "NW_notebook", "value" = "compute_measures")))
 # https://cyto-cc.cytoreason.com/workflow/wf-f92e284fb6
 
-get_workflow(nw_measures, wait = TRUE)
-nw_measures_res <- readRDS(get_task_outputs(nw_measures, task_id = 0, files_names_grepl_pattern = "output.rds"))
+#get_workflow(nw_measures, wait = TRUE)
+nw_measures_res <- readRDS(get_task_outputs('wf-f92e284fb6', task_id = 0, files_names_grepl_pattern = "output.rds"))
+# nw_measures_res <- readRDS(get_task_outputs(nw_measures, task_id = 0, files_names_grepl_pattern = "output.rds"))
 #head(nw_measures_res)
 write.csv(nw_measures_res, '~/UC_NW_2025/outputs/inf_mucosal_nw_measures_res_0.6.csv')
 
+
+######## Vis
+RA_nw_bulk_pruned_0.5_degree_hist <- ggplot(nw_measures_res, aes(x = degree)) +
+  geom_histogram(binwidth = 0.005, fill = "skyblue", color = "black") +
+  labs(title = paste0("Degree distribution - UC Inflamed Mucosal Network"),
+       x = "Node degree",
+       y = "No. nodes") +
+  theme_minimal()+
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14),
+    legend.position = "none",
+    plot.title = element_text(size = 10, hjust = 0.5,face='bold'))
+RA_nw_bulk_pruned_0.5_degree_hist
+
+RA_nw_bulk_pruned_0.5_eigen_centrality_hist <- ggplot(nw_measures_res, aes(x = eigen_centrality)) +
+  geom_histogram(binwidth = 0.05, fill = "skyblue", color = "black") +
+  labs(title = paste0("Eigen centrality distribution - UC Inflamed Mucosal Network"),
+       x = "Node eigen centrality",
+       y = "No. nodes") +
+  theme_minimal()+
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14),
+    legend.position = "none",
+    plot.title = element_text(size = 10, hjust = 0.5,face='bold'))
+RA_nw_bulk_pruned_0.5_eigen_centrality_hist
+
+RA_nw_bulk_pruned_0.5_betweenness_hist <- ggplot(nw_measures_res, aes(x = betweenness)) +
+  geom_histogram(binwidth = 0.0005, fill = "skyblue", color = "black") +
+  labs(title = paste0("Betweenness distribution - UC Inflamed Mucosal Network"),
+       x = "Node betweenness",
+       y = "No. nodes") +
+  theme_minimal()+
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14),
+    legend.position = "none",
+    plot.title = element_text(size = 10, hjust = 0.5,face='bold'))
+RA_nw_bulk_pruned_0.5_betweenness_hist
+
+
+RA_nw_bulk_pruned_0.5_page_rank_hist <- ggplot(nw_measures_res, aes(x = page_rank)) +
+  geom_histogram(binwidth = 0.00005, fill = "skyblue", color = "black") +
+  labs(title = paste0("Page rank distribution - UC Inflamed Mucosal Network"),
+       x = "Node page rank",
+       y = "No. nodes") +
+  theme_minimal()+
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14),
+    legend.position = "none",
+    plot.title = element_text(size = 10, hjust = 0.5,face='bold'))
+RA_nw_bulk_pruned_0.5_page_rank_hist
+
+RA_nw_bulk_pruned_0.5_closeness_hist <- ggplot(nw_measures_res, aes(x = closeness)) +
+  geom_histogram(binwidth = 0.0005, fill = "skyblue", color = "black") +
+  labs(title = paste0("Closeness distribution - UC Inflamed Mucosal Network"),
+       x = "Node closeness",
+       y = "No. nodes") +
+  theme_minimal()+
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14),
+    legend.position = "none",
+    plot.title = element_text(size = 10, hjust = 0.5,face='bold'))
+RA_nw_bulk_pruned_0.5_closeness_hist
+
+
+### Check max distance (for unweighted network)
+# igraph object
+nw_bulk_pruned_graph <- igraph::graph_from_data_frame(d=nw_measures_res, directed = FALSE)
+
+# pairwise distances
+gene_gene_distances <- igraph::distances(nw_bulk_pruned_graph, mode = "all", algorithm = "unweighted")
+
+# maximum distance
+max_distance <- max(gene_gene_distances[gene_gene_distances != Inf])  # Exclude infinite values (if there are disconnected components)
+print(max_distance)  # results show 6
+
+
+### Bio QC for Gali
+# post_processes_nw_short <- (post_processes_nw[,c(2,3,9)])
+# colnames(post_processes_nw_short) <- c('from', 'to', 'cor')
+post_processes_nw_chec <- post_processes_nw
+colnames(post_processes_nw_chec)[colnames(post_processes_nw_chec) == 'Var1'] <- 'From'
+colnames(post_processes_nw_chec)[colnames(post_processes_nw_chec) == 'Var2'] <- 'To'
+post_processes_nw_as_graph <- igraph::graph_from_data_frame(d=post_processes_nw_chec[,2:10])
+visualize_gene_set_subgraphs(post_processes_nw_as_graph , mono_genesets[5], nw_measures_res, centrality_measure = "page_rank")
 
