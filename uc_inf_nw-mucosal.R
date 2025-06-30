@@ -1,6 +1,7 @@
 
 #### Load environment ####
 library("cytoreason.ccm.pipeline.qc")
+library(cytoreason.assets, lib.loc = "/opt/R/4.4.2/lib/R/library")
 library("cytoreason.individual.variation")
 library(cytoreason.validator.apps.client)
 library(cytoreason.cc.client)
