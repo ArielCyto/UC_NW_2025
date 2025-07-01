@@ -162,7 +162,7 @@ full_corr_matrix_res <- get_full_corr_matrix(esets = esets_nw_final,
 edge_min_count <- 0
 # if chunk_size is NULL, a default value (1000) will be used
 chunk_size <- NULL
-edge_meta_res <- meta_pvalue_edge(nets = full_corr_matrix_res[["reference_edges_wid"]],
+edge_meta_res <- meta_pvalue_edge(nets ='wf-b9e52e3ba9',
                                   edge_min_count = edge_min_count,
                                   IMAGE = IMAGE,
                                   mem_req = default_memory_request,
@@ -170,7 +170,12 @@ edge_meta_res <- meta_pvalue_edge(nets = full_corr_matrix_res[["reference_edges_
 # https://cyto-cc.cytoreason.com/workflow/wf-9654ac7614
 get_workflow(edge_meta_res[["edge_meta"]][["wf_id"]], wait = TRUE)
 
+
+
 all_edges <- cytoreason.io::read_data(cytoreason.cc.client::get_task_outputs(res=edge_meta_res[["edge_meta"]][["wf_id"]], task_id = NULL, task_name = edge_meta_res[["edge_meta"]][["task_name"]]))
+
+#all_edges <- cytoreason.io::read_data(cytoreason.cc.client::get_task_outputs(res= 'wf-9654ac7614', task_id = NULL, task_name = 'meta-pvalue-post'))
+
 q_pvalue_plot <- function (res) 
 {
   ecdf_func <- ecdf(res[["q_pvalue"]])
@@ -187,15 +192,27 @@ FDR_plot <- function (res)
             main = "Number of edges above q_pvalue_fdr")
 }
 
-
+# filter for positive corr only!
+all_edges <- all_edges[all_edges$cor >=0,]
 q_pvalue_plot(all_edges)
 FDR_plot(all_edges)
 
+# pos only (check for 0.07, check of decrease the Y axis)
+library(ggplot2)
+p <- ggplot(all_edges, aes(x = q_pvalue_fdr)) +
+  geom_histogram(binwidth = 0.005, fill = "skyblue", color = "black") +
+  theme_minimal()+
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14),
+    legend.position = "none",
+    plot.title = element_text(size = 10, hjust = 0.5,face='bold'))
+p + ylim(0,(5*10^6)) +geom_vline(xintercept = 0.07)
 
 
 ##### Step 4 - Perform edge pruning analysis on meta gene-gene correlation matrix
 edge_pruning_corr <- seq(0, 1, 0.05)
-fdr_thresholds <- list(c(fdr_th=0.05, q_fdr_th=0.02))
+fdr_thresholds <- list(c(fdr_th=0.05, q_fdr_th=0.07))
 important_genes <- NULL
 pruning_info_wfid <- 
   run_function_dist(function(full_corr_matrix_res, ...) {
@@ -210,17 +227,20 @@ pruning_info_wfid <-
   IMAGE = IMAGE,
   mem_req = default_memory_request,
   cytocc = TRUE,
-  plot = FALSE,
+  plot = FALSE, 
   important_genes = important_genes,
   image = IMAGE,
   memory_request = default_memory_request,
   force_execution = FALSE, replace_image_tags = TRUE, 
   tags = list(list("name" = "NW_notebook", "value" =  "edge_pruning_analysis")))
 
-# https://cyto-cc.cytoreason.com/workflow/wf-dd6a6ddf1e
+# https://cyto-cc.cytoreason.com/workflow/wf-dd6a6ddf1e - 0.02 q_pavlue_fdr (0.45 pareto) - all corrs
+# https://cyto-cc.cytoreason.com/workflow/wf-4cf7c1460f - 0.07 q_pavlue_fdr - (0.4 pareto) - all corrs
+# https://cyto-cc.cytoreason.com/workflow/wf-5887c4de5c - 0.07 q_pavlue_fdr - (xx pareto) - only pos corrs
 
 get_workflow(pruning_info_wfid, wait = TRUE)
-pruning_info <- get_outputs_dist(pruning_info_wfid)$output.rds$edge_pruning_info
+pruning_info <- get_outputs_dist('wf-4cf7c1460f')$output.rds$edge_pruning_info
+pruning_info_pos <- pruning_info[pruning_info$co]
 p_nodes(pruning_info)
 p_edges(pruning_info)
 p_components(pruning_info)
@@ -228,3 +248,31 @@ p_paretofront(pruning_info)
 if (!is.null(important_genes)){
   p_important_genes(pruning_info)
 }
+
+
+# use case 1: postprocess edge meta output
+nets = consume_workflow_task_output(wf = edge_meta_res[["edge_meta"]][["wf_id"]], 
+                                    task_id = NULL,
+                                    task_name = edge_meta_res[["edge_meta"]][["task_name"]])
+
+# use case 2: postprocess on previous orchestrated_edge_pruning results
+
+# See orchestrated_edge_pruning doc for details regarding parameters 
+prune <- c("min_abs_corr" = 0.6, "max_fdr" = 0.05, "min_q_fdr" = 0.05)
+corr_direction <- "none"
+subset_gene_list <- NULL
+min_connected_component <- NULL
+filter_components <- NULL
+post_processes_nw <- 
+  run_function_dist(cytoreason.individual.variation::orchestrated_edge_pruning,
+                    nets = nets, 
+                    prune = prune, 
+                    corr_direction = corr_direction, 
+                    subset_gene_list = subset_gene_list,
+                    min_connected_component = min_connected_component,
+                    filter_components = filter_components,
+                    image = IMAGE,
+                    memory_request = default_memory_request,
+                    force_execution = FALSE, replace_image_tags = TRUE, 
+                    tags = list(list("name" = "uc_inf_network", "value" = "orchestrated_edge_pruning")))
+
