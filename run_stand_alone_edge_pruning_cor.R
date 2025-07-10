@@ -6,7 +6,7 @@ pruning_info_wfid <-
     pruning_info_res <- cytoreason.individual.variation::edge_pruning_th_comb(...)
     return(pruning_info_res)
   },
-  nets = 'wf-d896d61ba5' , # 'wf-9654ac7614', 
+  nets =  'wf-9654ac7614',# - only pos, #'wf-d896d61ba5' ,
   nets_task_name = 'meta-pvalue-post',
   cor_th = edge_pruning_corr, 
   fdr_ths = fdr_thresholds, 
@@ -19,6 +19,7 @@ pruning_info_wfid <-
   image = IMAGE,
   memory_request = default_memory_request,
   force_execution = FALSE, replace_image_tags = TRUE, 
-  tags = list(list("name" = "test_010725", "value" =  "edge_pruning_analysis")))
+  tags = list(list("name" = "FDR0.07_all_corrs", "value" =  "edge_pruning_analysis")))
 #  wf-6c50137329 - test with yasmin
-#  wf-fe4962f065 - positive cor only
+#  wf-fe4962f065 - positive cor only 0.07
+#  wf-acf871af23 - all corrs 0.07
