@@ -13,6 +13,7 @@ library(AnnotationDbi)
 library(org.Hs.eg.db)
 library(patchwork)
 library(ggplot2)
+library(cytoreason.assets, lib.loc = "/opt/R/4.4.2/lib/R/library")
 source("~/UC_NW_2025/Vis_functions.R")
 devtools::load_all("~/analysis-p03-poc1/")
 # helper func
@@ -514,7 +515,7 @@ tail_probability__page_rank_g <- ggplot(nwCentrality_page_rank, aes(x= reorder(S
   coord_flip()+
   border() +
   ylab("Permutation Tail \n Probability") + xlab("")+
-  geom_hline(yintercept=0.75, linetype="dashed")+
+  geom_hline(yintercept=1.0, linetype="dashed")+
   theme_bw()+theme(strip.text = element_text(size=9), panel.grid.major = element_blank(),
                    axis.text.y = element_text(size=8),
                    panel.grid.minor = element_blank(),                                                                  
@@ -536,7 +537,7 @@ BulkAD_NW_cent$Identifier[BulkAD_NW_cent$Identifier == 'ad-permutations'] <-  'U
 
 BulkAD_NW_cent$CleanName <- BulkAD_NW_cent$Identifier
 BulkAD_NW_cent$SubCategory <-  BulkAD_NW_cent$Identifier
-BulkAD_NW_cent$BroadCategory[BulkAD_NW_cent$Identifier %in% c('PAR2', 'IL7', 'IL4','random-fc' ,'UC-permutations')] <- 'negativeControls'
+BulkAD_NW_cent$BroadCategory[BulkAD_NW_cent$Identifier %in% c('KLK5', 'KLK7', 'GPR15L', 'BMP7','random-fc' ,'UC-permutations')] <- 'negativeControls'
 # colnames(AD_NW_cent_df_sub_combined)[!colnames(AD_NW_cent_df_sub_combined) %in% colnames(BulkAD_NW_cent)]
 
 
@@ -556,9 +557,9 @@ filtered_data <- AD_NW_cent_df_sub_combined %>%
   dplyr::mutate(Type = factor(Type, levels = c("bulk", "adjusted"))) %>%
   # Ensure BroadCategory has "negativeControls" last
   dplyr::mutate(BroadCategory = factor(BroadCategory, levels = c("Target", "negativeControls"))) %>%
-  # Order SubCategory by eigen_centrality_median within each Type
+  # Order SubCategory by page_rank_median within each Type
   dplyr::group_by(Type, BroadCategory) %>%
-  dplyr::arrange(Type, BroadCategory, desc(eigen_centrality_median)) %>%
+  dplyr::arrange(Type, BroadCategory, desc(page_rank_median)) %>%
   dplyr::mutate(SubCategory = factor(SubCategory, levels = rev(unique(SubCategory)))) %>%
   dplyr::ungroup()
 
@@ -574,21 +575,21 @@ max_values <- AD_NW_cent_df_sub_combined[AD_NW_cent_df_sub_combined$ListType %in
   dplyr::filter(BroadCategory %in% "negativeControls") %>%
   dplyr::mutate(Type = factor(Type,levels = c("bulk","adjusted"))) %>%
   dplyr::group_by(Type) %>%
-  dplyr::summarise(max_eigen_centrality_median = max(eigen_centrality_median, na.rm = TRUE)) 
+  dplyr::summarise(max_page_rank_median = max(page_rank_median, na.rm = TRUE)) 
 
 AD_NW_cent_df_sub_combined[AD_NW_cent_df_sub_combined$SubCategory %in% "PD1",'SubCategory'] <- "PDL1"
 
-eigen_centrality_median_g = AD_NW_cent_df_sub_combined %>%
+page_rank_median_g = AD_NW_cent_df_sub_combined %>%
   dplyr::filter(BroadCategory %in% c("Target", "negativeControls")) %>%
   dplyr::mutate(Type = factor(Type,levels = c("bulk","adjusted"))) %>%
-  dplyr::select(c(ListName,eigen_centrality_median,Type,SubCategory,CleanName,ListType)) %>%
+  dplyr::select(c(ListName,page_rank_median,Type,SubCategory,CleanName,ListType)) %>%
   dplyr::mutate(SubCategory = factor(SubCategory,levels = rev(as.character(unique(filtered_data$SubCategory))))) %>%
   unique() %>%
-  ggplot(aes(x = SubCategory,y = eigen_centrality_median)) +
+  ggplot(aes(x = SubCategory,y = page_rank_median)) +
   facet_wrap(~ Type ,scales = "free",ncol = 1)+
   geom_point(data = function(x) subset(x,ListType != "gene_list"),aes(color = SubCategory), alpha=0.5 ,color = "grey") +
   geom_point(data = function(x) subset(x,ListType == "gene_list"),aes(color = SubCategory), size=3) +
-  geom_hline(data = max_values, aes(yintercept = max_eigen_centrality_median), linetype = "dashed", color = "black") +  # Add hline here
+  geom_hline(data = max_values, aes(yintercept = max_page_rank_median), linetype = "dashed", color = "black") +  # Add hline here
   coord_flip()+
   theme_minimal() + 
   theme(legend.position = "none")+
@@ -596,7 +597,7 @@ eigen_centrality_median_g = AD_NW_cent_df_sub_combined %>%
   border() +ylab("Median page rank - Inflamed UC Targets") + xlab("") +
   #  scale_x_log10() +
   scale_color_manual(values = targetColors)
-eigen_centrality_median_g
+page_rank_median_g
 
 degree_median_g+closeness_median_g
 eigen_centrality_median_g+page_rank_median_g
@@ -605,33 +606,194 @@ eigen_centrality_median_g+page_rank_median_g
 ###### check up and down regulated genes #######
 library(org.Hs.eg.db)
 library(annotate)
-entrez_neg <- mapIds(org.Hs.eg.db, c('KLK5', 'KLK7', 'GPR15', 'BMP7'), 'ENTREZID', 'SYMBOL') # negative control
-entrez_pos <- mapIds(org.Hs.eg.db, c('IL23', 'IL17', 'IL2', 'IL21', 'IL18', 'IL1A', 'TNFA', 'IL6', 'IL13'), 'ENTREZID', 'SYMBOL') # positive control
+library(dplyr)
+library(ggpubr)
 
-check_df <- nw_measures_res[nw_measures_res$feature_id %in% c(entrez_neg,entrez_pos),]
+# entrez_neg <- mapIds(org.Hs.eg.db, c('KLK5', 'KLK7', 'GPR15', 'BMP7'), 'ENTREZID', 'SYMBOL') # negative control
+# entrez_pos <- mapIds(org.Hs.eg.db, c('IL23', 'IL17', 'IL2', 'IL21', 'IL18', 'IL1A', 'TNFA', 'IL6', 'IL13'), 'ENTREZID', 'SYMBOL') # positive control
+
+entrez_pos <- c('101','183','229','356','356','360','383','596','629','834','1116','1233','1278','1364','1462','1493','1536','1673','2182','2212','2625','2697','2833','2872','2919','2921','3309','3383','3426','3500','3552','3554','3557','3589','3592','3593','3596','3598','3627','3643','3820','4046','4199','4312','4314','4319','4513','4582','4586','4843','4982','5111','5268','5743','5771','5967','5970','6095','6286','6288','6347','6356','6361','6374','6556','6648','6772','6775','6776','6781','6999','7031','7067','7070','7076','7083','7100','7184','7332','7412','7474','7494','7980','8651','8764','8808','9021','9075','10288','10551','23650','27074','27290','50943','51573','55630','56300','64332','80201','83998','90865','406913','406986','406991','729230','1235','3458','3458','3553','3569','3569','3576','3576','3576','3577','3578','3579','3586','3586','3605','3605','3605','5320','6286','6364','6364','6774','7040','7124','7124','50616','50616','51561','51561','55801','59067','112744')
+entrez_rand <- unlist(c(sample_n(as.data.frame(nw_measures_res$feature_id),length(entrez_pos))),use.names = FALSE)
+  
+check_df <- nw_measures_res[nw_measures_res$feature_id %in% c(entrez_rand,entrez_pos),]
 check_df$control <- NA
-check_df$control[check_df$feature_id %in% entrez_neg] <- 'NegativeControl'
+check_df$control[check_df$feature_id %in% entrez_rand] <- 'Random'
 check_df$control[check_df$feature_id %in% entrez_pos] <- 'PositiveControl'
-boxplot(check_df$betweennes[check_df$control == 'NegativeControl'],check_df$betweennes[check_df$control == 'PositiveControl'],
-        main = "Boxplots for betweennes",
-        at = c(1,2),
-        names = c("NegativeControl genes", "PositiveControl genes"),
-        las = 2,
-        col = c("orange","lightgreen"),
-        border = "brown")
 
-boxplot(check_df$page_rank[check_df$control == 'NegativeControl'],check_df$page_rank[check_df$control == 'PositiveControl'],
-        main = "Boxplots for page_rank",
-        at = c(1,2),
-        names = c("NegativeControl genes", "PositiveControl genes"),
-        las = 2,
-        col = c("orange","lightgreen"),
-        border = "brown")
 
-boxplot(check_df$closeness[check_df$control == 'NegativeControl'],check_df$closeness[check_df$control == 'PositiveControl'],
-        main = "Boxplots for closeness",
+boxplot(check_df$betweenness[check_df$control == 'Random'],check_df$betweenness[check_df$control == 'PositiveControl'],
+        main = paste0("Boxplots for betweenness \np.value = ",t.test(betweenness ~ control, data = check_df)$p.value),
         at = c(1,2),
-        names = c("NegativeControl genes", "PositiveControl genes"),
-        las = 2,
-        col = c("orange","lightgreen"),
-        border = "brown")
+        names = c("Random genes", "PositiveControl genes"),
+        las = 1,
+col = c("brown3","lightblue"),
+border = "gray")
+
+t.test(betweenness ~ control, data = check_df)
+
+boxplot(check_df$page_rank[check_df$control == 'Random'],check_df$page_rank[check_df$control == 'PositiveControl'],
+        main = paste0("Boxplots for page_rank \np.value = ",t.test(page_rank ~ control, data = check_df)$p.value),
+        at = c(1,2), 
+        names = c("Random genes", "PositiveControl genes"),
+        las = 1,
+        col = c("brown3","lightblue"),
+        border = "gray")
+
+t.test(page_rank ~ control, data = check_df)
+
+boxplot(check_df$closeness[check_df$control == 'Random'],check_df$closeness[check_df$control == 'PositiveControl'],
+        main = paste0("Boxplots for closeness \np.value = ",t.test(closeness ~ control, data = check_df)$p.value),
+        at = c(1,2),
+        names = c("Random genes", "PositiveControl genes"),
+        las = 1,
+        col = c("brown3","lightblue"),
+        border = "gray")
+
+t.test(closeness ~ control, data = check_df)
+
+boxplot(check_df$degree[check_df$control == 'Random'],check_df$degree[check_df$control == 'PositiveControl'],
+        main = paste0("Boxplots for degree \np.value = ",t.test(degree ~ control, data = check_df)$p.value),
+        at = c(1,2),
+        names = c("Random genes", "PositiveControl genes"),
+        las = 1,
+        col = c("brown3","lightblue"),
+        border = "gray")
+
+t.test(degree ~ control, data = check_df)
+
+boxplot(check_df$eigen_centrality[check_df$control == 'Random'],check_df$degree[check_df$control == 'PositiveControl'],
+        main = paste0("Boxplots for eigen_centrality \np.value = ",t.test(eigen_centrality ~ control, data = check_df)$p.value),
+        at = c(1,2),
+        names = c("Random genes", "PositiveControl genes"),
+        las = 1,
+        col = c("brown3","lightblue"),
+        border = "gray")
+
+t.test(eigen_centrality ~ control, data = check_df)
+
+
+###############################################
+
+
+entrez_up_regulated <- mapIds(org.Hs.eg.db, c('CXCL1','TIMP1','CFB','FUT8','DUOX2','CXCL3','MMP7','ARFGAP3','PI3','LYN','KYNU','ANXA1','ZBP1','SLC6A14','CXCL2','LCN2','PECAM1','CD55','CD44','FKBP11'), 'ENTREZID', 'SYMBOL') # negative control
+entrez_down_regulated <- mapIds(org.Hs.eg.db, c('PAQR5','PADI2','RUNDC3B', 'UGT2A3', 'WSCD1', 'HMGCS2','SGK2','ENTPD5','PXMP2','SLC35G1','ACAT1','AQP8','INPP5J','CHP2','ANK3','ABCB1','CNNM2','SLC39A2','PLCD1','CDK20'), 'ENTREZID', 'SYMBOL') # positive control
+entrez_rand_regulated <- unlist(c(sample_n(as.data.frame(nw_measures_res$feature_id),20)),use.names = FALSE)
+entrez_down_regulated_non_sig <- mapIds(org.Hs.eg.db, c('FNDC10','AKR1C1','FBXO7','STK19','TRIM16L','DNAJC5G','NDNF','ZNHIT2','HSF2BP','OR5AN1','DNAH11','TRIM62','TTC8','USP5','PRY2','ASTN2','FAM81B',
+'SNRNP25','PAFAH1B3','C9orf43'), 'ENTREZID', 'SYMBOL') # positive control
+
+
+check_df <- nw_measures_res[nw_measures_res$feature_id %in% c(entrez_up_regulated,entrez_down_regulated_non_sig),]
+check_df$control <- NA
+check_df$control[check_df$feature_id %in% entrez_up_regulated] <- 'Up-regulated genes'
+check_df$control[check_df$feature_id %in% entrez_down_regulated_non_sig] <- 'Down-regulated genes - non sig'
+#check_df$control[check_df$feature_id %in% entrez_rand_regulated] <- 'random genes'
+
+
+boxplot(check_df$betweenness[check_df$control == 'Up-regulated genes'],check_df$betweenness[check_df$control == 'Down-regulated genes - non sig'],
+        main = paste0("Boxplots for betweenness \np.value = ",t.test(betweenness ~ control, data = check_df)$p.value),
+        at = c(1,2),
+        names = c("Up-regulated genes","Down-regulated genes - non sig"),
+        las = 1,
+        col = c("salmon2","steelblue2"),
+        border = "gray")
+
+t.test(betweenness ~ control, data = check_df)
+
+boxplot(check_df$page_rank[check_df$control == 'Up-regulated genes'],check_df$page_rank[check_df$control == 'Down-regulated genes - non sig'],
+        main = paste0("Boxplots for page_rank \np.value = ",t.test(page_rank ~ control, data = check_df)$p.value),
+        at = c(1,2),
+        names = c("Up-regulated genes", "Down-regulated genes - non sig"),
+        las = 1,
+        col = c("salmon2","steelblue2"),
+        border = "gray")
+
+t.test(page_rank ~ control, data = check_df)
+
+boxplot(check_df$closeness[check_df$control == 'Up-regulated genes'],check_df$closeness[check_df$control == 'Down-regulated genes - non sig'],
+        main = paste0("Boxplots for closeness \np.value = ",t.test(closeness ~ control, data = check_df)$p.value),
+        at = c(1,2),
+        names = c("Up-regulated genes", "Down-regulated genes - non sig"),
+        las = 1,
+        col = c("salmon2","steelblue2"),
+        border = "gray")
+
+t.test(closeness ~ control, data = check_df)
+
+boxplot(check_df$eigen_centrality[check_df$control == 'Up-regulated genes'],check_df$eigen_centrality[check_df$control == 'Down-regulated genes - non sig'],
+        main = paste0("Boxplots for eigen_centrality \np.value = ",t.test(eigen_centrality ~ control, data = check_df)$p.value),
+        at = c(1,2),
+        names = c("Up-regulated genes", "Down-regulated genes - non sig"),
+        las = 1,
+        col = c("salmon2","steelblue2"),
+        border = "gray")
+
+t.test(eigen_centrality ~ control, data = check_df)
+
+boxplot(check_df$degree[check_df$control == 'Up-regulated genes'],check_df$degree[check_df$control == 'Down-regulated genes - non sig'],
+        main = paste0("Boxplots for degree \np.value = ",t.test(degree ~ control, data = check_df)$p.value),
+        at = c(1,2),
+        names = c("Up-regulated genes", "Down-regulated genes - non sig"),
+        las = 1,
+        col = c("salmon2","steelblue2"),
+        border = "gray")
+
+t.test(degree ~ control, data = check_df)
+
+
+##################
+check_df <- nw_measures_res[nw_measures_res$feature_id %in% c(entrez_up_regulated,entrez_down_regulated, entrez_rand_regulated),]
+check_df$control <- NA
+check_df$control[check_df$feature_id %in% entrez_up_regulated] <- 'Up-regulated genes'
+check_df$control[check_df$feature_id %in% entrez_down_regulated] <- 'Down-regulated genes'
+check_df$control[check_df$feature_id %in% entrez_rand_regulated] <- 'random genes'
+
+boxplot(check_df$betweenness[check_df$control == 'Up-regulated genes'],check_df$betweenness[check_df$control == 'Down-regulated genes'],
+        check_df$betweenness[check_df$control == 'random genes'],
+        main = paste0("Boxplots for betweenness \np.value up vs rand = ",t.test(betweenness ~ control, data = check_df[check_df$control != 'Down-regulated genes',])$p.value, 
+                      "\np.value down vs rand = ",t.test(betweenness ~ control, data = check_df[check_df$control != 'Up-regulated genes',])$p.value),
+        at = c(1,2,3),
+        names = c("Up-regulated genes genes","Down-regulated genes", 'Random genes'),
+        las = 1,
+        col = c("salmon2","steelblue2", 'gray27'),
+        border = "gray")
+
+boxplot(check_df$page_rank[check_df$control == 'Up-regulated genes'],check_df$page_rank[check_df$control == 'Down-regulated genes'],
+        check_df$page_rank[check_df$control == 'random genes'],
+        main = paste0("Boxplots for page_rank \np.value up vs rand = ",t.test(page_rank ~ control, data = check_df[check_df$control != 'Down-regulated genes',])$p.value, 
+                      "\np.value down vs rand = ",t.test(page_rank ~ control, data = check_df[check_df$control != 'Up-regulated genes',])$p.value),
+        at = c(1,2,3),
+        names = c("Up-regulated genes genes","Down-regulated genes", 'Random genes'),
+        las = 1,
+        col = c("salmon2","steelblue2", 'gray27'),
+        border = "gray")
+
+boxplot(check_df$closeness[check_df$control == 'Up-regulated genes'],check_df$closeness[check_df$control == 'Down-regulated genes'],
+        check_df$closeness[check_df$control == 'random genes'],
+        main = paste0("Boxplots for closeness \np.value up vs rand = ",t.test(closeness ~ control, data = check_df[check_df$control != 'Down-regulated genes',])$p.value, 
+                      "\np.value down vs rand = ",t.test(closeness ~ control, data = check_df[check_df$control != 'Up-regulated genes',])$p.value),
+        at = c(1,2,3),
+        names = c("Up-regulated genes genes","Down-regulated genes", 'Random genes'),
+        las = 1,
+        col = c("salmon2","steelblue2", 'gray27'),
+        border = "gray")
+
+
+boxplot(check_df$eigen_centrality[check_df$control == 'Up-regulated genes'],check_df$eigen_centrality[check_df$control == 'Down-regulated genes'],
+        check_df$eigen_centrality[check_df$control == 'random genes'],
+        main = paste0("Boxplots for eigen_centrality \np.value up vs rand = ",t.test(eigen_centrality ~ control, data = check_df[check_df$control != 'Down-regulated genes',])$p.value, 
+                      "\np.value down vs rand = ",t.test(eigen_centrality ~ control, data = check_df[check_df$control != 'Up-regulated genes',])$p.value),
+        at = c(1,2,3),
+        names = c("Up-regulated genes genes","Down-regulated genes", 'Random genes'),
+        las = 1,
+        col = c("salmon2","steelblue2", 'gray27'),
+        border = "gray")
+
+boxplot(check_df$degree[check_df$control == 'Up-regulated genes'],check_df$degree[check_df$control == 'Down-regulated genes'],
+        check_df$degree[check_df$control == 'random genes'],
+        main = paste0("Boxplots for degree \np.value up vs rand = ",t.test(degree ~ control, data = check_df[check_df$control != 'Down-regulated genes',])$p.value, 
+                      "\np.value down vs rand = ",t.test(degree ~ control, data = check_df[check_df$control != 'Up-regulated genes',])$p.value),
+        at = c(1,2,3),
+        names = c("Up-regulated genes genes","Down-regulated genes", 'Random genes'),
+        las = 1,
+        col = c("salmon2","steelblue2", 'gray27'),
+        border = "gray")
