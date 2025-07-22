@@ -263,8 +263,8 @@ nets = consume_workflow_task_output(wf = 'wf-9654ac7614', # wf = edge_meta_res$w
 prune <- c("min_abs_corr" = 0.45, "max_fdr" = 0.05, "min_q_fdr" = 0.02)
 corr_direction <- "positive_only"
 subset_gene_list <- NULL
-min_connected_component <- NULL
-filter_components <- as.integer(c(3))
+min_connected_component <- 4
+filter_components <- NULL
 post_processes_nw <- 
   run_function_dist(cytoreason.individual.variation::orchestrated_edge_pruning,
                     nets = nets, 
@@ -278,7 +278,7 @@ post_processes_nw <-
                     force_execution = FALSE, replace_image_tags = TRUE, 
                     tags = list(list("name" = "uc_inf_network", "value" = "orchestrated_edge_pruning")))
 # wf-989c127746
-
+# check Arnon's solution wf-ee01666d3f
 
 ##### Step 6 - Compute NW Measurements per node ##### 
 nw_measures <- 
@@ -295,9 +295,10 @@ nw_measures <-
   force_execution = FALSE, replace_image_tags = TRUE, 
   tags = list(list("name" = "NW_notebook", "value" = "compute_measures")))
 # https://cyto-cc.cytoreason.com/workflow/wf-053ebd8ff3
+# wf-11a5a49e43 - with Arnon's fix
 get_workflow(nw_measures, wait = TRUE)
 #nw_measures_res <- readRDS(get_task_outputs(nw_measures, task_id = 0, files_names_grepl_pattern = "output.rds"))
-nw_measures_res <- readRDS(get_task_outputs('wf-053ebd8ff3', task_id = 0, files_names_grepl_pattern = "output.rds"))
+nw_measures_res <- readRDS(get_task_outputs('wf-11a5a49e43', task_id = 0, files_names_grepl_pattern = "output.rds"))
 write.csv(nw_measures_res, '~/UC_NW_2025/outputs/inf_nw_measures_res_0.45.csv')
 
 
@@ -388,17 +389,22 @@ combo_genesets <- customSignatures$dupiMono
 mono_genesets <- customSignatures$monotherapies
 mono_genesets
 #post_processes_nw_tmp <- readRDS(get_task_outputs(post_processes_nw$workflow_id, task_id = 0, files_names_grepl_pattern = "output.rds"))
-post_processes_nw_tmp <- readRDS(get_task_outputs('wf-989c127746', task_id = 0, files_names_grepl_pattern = "output.rds"))
+post_processes_nw_tmp <- readRDS(get_task_outputs('wf-ee01666d3f', task_id = 0, files_names_grepl_pattern = "output.rds"))
 colnames(post_processes_nw_tmp)[colnames(post_processes_nw_tmp) == 'Var1'] <- 'From'
 colnames(post_processes_nw_tmp)[colnames(post_processes_nw_tmp) == 'Var2'] <- 'To'
 post_processes_nw_as_graph <- igraph::graph_from_data_frame(d=post_processes_nw_tmp[,2:10])
-# IL23, TNF, TSLP, IL4, IL6
+# positive - IL23, TNF, TSLP, IL4, IL6
 visualize_gene_set_subgraphs(post_processes_nw_as_graph , mono_genesets[19], nw_measures_res, centrality_measure = "page_rank") #IL6
-visualize_gene_set_subgraphs(post_processes_nw_as_graph , mono_genesets[33], nw_measures_res, centrality_measure = "page_rank") #TNFa
+visualize_gene_set_subgraphs(post_processes_nw_as_graph , mono_genesets[22], nw_measures_res, centrality_measure = "page_rank") #TNFa
 visualize_gene_set_subgraphs(post_processes_nw_as_graph , mono_genesets[12], nw_measures_res, centrality_measure = "page_rank") #IL23
 visualize_gene_set_subgraphs(post_processes_nw_as_graph , mono_genesets[18], nw_measures_res, centrality_measure = "page_rank") #IL4
 visualize_gene_set_subgraphs(post_processes_nw_as_graph , mono_genesets[23], nw_measures_res, centrality_measure = "page_rank") #TSLP
 
+# negative - BMP7, KLK5, KLK7, GPR15L
+visualize_gene_set_subgraphs(post_processes_nw_as_graph , mono_genesets[33], nw_measures_res, centrality_measure = "page_rank") #BMP7
+visualize_gene_set_subgraphs(post_processes_nw_as_graph , mono_genesets[26], nw_measures_res, centrality_measure = "page_rank") #GPR15L
+visualize_gene_set_subgraphs(post_processes_nw_as_graph , mono_genesets[28], nw_measures_res, centrality_measure = "page_rank") #KLK5
+visualize_gene_set_subgraphs(post_processes_nw_as_graph , mono_genesets[29], nw_measures_res, centrality_measure = "page_rank") #KLK7
 
 
 ###### Compare bio-exp to random- Run Shiran's code ###### 
@@ -409,11 +415,11 @@ fullList = unlist(combined_customSignatures, recursive = FALSE)
 names(fullList) = stringr::str_replace(names(fullList),"\\.","__")
 
 # background
-nw_measures_res <- readRDS(get_task_outputs('wf-053ebd8ff3', task_id = 0, files_names_grepl_pattern = "output.rds"))
+nw_measures_res <- readRDS(get_task_outputs('wf-11a5a49e43', task_id = 0, files_names_grepl_pattern = "output.rds"))
 EntrezInput = unique(as.character(nw_measures_res$feature_id))
 nIter <- 100 #updating number of iterations
 
-bulk_centrality_wf <- "wf-053ebd8ff3" # nw_measures_res
+bulk_centrality_wf <- "wf-11a5a49e43" # nw_measures_res
 
 bulk_nw_cent <-  cytoreason.cc.client::run_method_dist(
   method = "NWParam_VersusRandom_modified",  
@@ -427,13 +433,14 @@ bulk_nw_cent <-  cytoreason.cc.client::run_method_dist(
   Niter = nIter)
 
 # wf-27fd559a96
+# wf-d0ccd845eb fixed
 
 #process bulk geneset centrality
 library(tidyr)
 library(dplyr)
 library(scales)
 library(ggpubr, lib.loc = "/opt/R/4.4.2/lib/R/library")
-BulkAD_NW_cent <- read_asset("wf-27fd559a96")
+BulkAD_NW_cent <- read_asset("wf-d0ccd845eb")
 BulkAD_NW_cent_pval <- BulkAD_NW_cent$Significance
 BulkAD_NW_cent_pval$Criteria <- paste(BulkAD_NW_cent_pval$Criteria, BulkAD_NW_cent_pval$Measure, sep="_")
 BulkAD_NW_cent_pval$Criteria[BulkAD_NW_cent_pval$Criteria %in% "OverlapProbability_NA"] <- "OverlapPercent"
@@ -515,7 +522,7 @@ tail_probability__page_rank_g <- ggplot(nwCentrality_page_rank, aes(x= reorder(S
   coord_flip()+
   border() +
   ylab("Permutation Tail \n Probability") + xlab("")+
-  geom_hline(yintercept=1.0, linetype="dashed")+
+  geom_hline(yintercept=1.4, linetype="dashed")+
   theme_bw()+theme(strip.text = element_text(size=9), panel.grid.major = element_blank(),
                    axis.text.y = element_text(size=8),
                    panel.grid.minor = element_blank(),                                                                  
@@ -528,7 +535,7 @@ tail_probability__page_rank_g
 
 ###########################3
 # AD_NW_cent_df_sub_combined <- read_asset("wf-c8c1f9bf0f")
-BulkAD_NW_cent <- read_asset("wf-27fd559a96") # check what is missing
+BulkAD_NW_cent <- read_asset("wf-d0ccd845eb") # check what is missing
 BulkAD_NW_cent <- BulkAD_NW_cent$FullParam
 BulkAD_NW_cent$Type <- 'bulk'
 BulkAD_NW_cent$BroadCategory <- 'Target'

@@ -183,8 +183,8 @@ nets = consume_workflow_task_output(wf = 'wf-f8cc81df81', # wf = edge_meta_res$w
 prune <- c("min_abs_corr" = 0.45, "max_fdr" = 0.05, "min_q_fdr" = 0.02)
 corr_direction <- "positive_only"
 subset_gene_list <- NULL
-min_connected_component <- NULL
-filter_components <- as.integer(c(3))
+min_connected_component <- 4
+filter_components <- NULL
 post_processes_nw <- 
   run_function_dist(cytoreason.individual.variation::orchestrated_edge_pruning,
                     nets = nets, 
@@ -197,7 +197,8 @@ post_processes_nw <-
                     memory_request = default_memory_request,
                     force_execution = FALSE, replace_image_tags = TRUE, 
                     tags = list(list("name" = "uc_hc_network", "value" = "orchestrated_edge_pruning")))
-# wf-e9b7254e63
+# wf-96cbcdc4ae - Arnon fixed
+
 
 ##### Step 6 - Compute NW Measurements per node ##### 
 nw_measures <- 
@@ -213,10 +214,11 @@ nw_measures <-
   memory_request = default_memory_request, 
   force_execution = FALSE, replace_image_tags = TRUE, 
   tags = list(list("name" = "NW_notebook", "value" = "compute_measures")))
-# https://cyto-cc.cytoreason.com/workflow/wf-58b9314909
+# https://cyto-cc.cytoreason.com/workflow/wf-b887714056 - Arnon fixed
+
 get_workflow(nw_measures, wait = TRUE)
 #nw_measures_res <- readRDS(get_task_outputs(nw_measures, task_id = 0, files_names_grepl_pattern = "output.rds"))
-nw_measures_res <- readRDS(get_task_outputs('wf-58b9314909', task_id = 0, files_names_grepl_pattern = "output.rds"))
+nw_measures_res <- readRDS(get_task_outputs('wf-b887714056', task_id = 0, files_names_grepl_pattern = "output.rds"))
 #write.csv(nw_measures_res, '~/UC_NW_2025/outputs/hc_nw_measures_res_0.45.csv')
 
 ##### Internal Visualization - Ariel & Gali ##### 
@@ -305,17 +307,22 @@ combo_genesets <- customSignatures$dupiMono
 mono_genesets <- customSignatures$monotherapies
 mono_genesets
 post_processes_nw_tmp <- readRDS(get_task_outputs(post_processes_nw$workflow_id, task_id = 0, files_names_grepl_pattern = "output.rds"))
-#post_processes_nw_tmp <- readRDS(get_task_outputs('wf-e9b7254e63', task_id = 0, files_names_grepl_pattern = "output.rds"))
+#post_processes_nw_tmp <- readRDS(get_task_outputs('wf-96cbcdc4ae', task_id = 0, files_names_grepl_pattern = "output.rds"))
 colnames(post_processes_nw_tmp)[colnames(post_processes_nw_tmp) == 'Var1'] <- 'From'
 colnames(post_processes_nw_tmp)[colnames(post_processes_nw_tmp) == 'Var2'] <- 'To'
 post_processes_nw_as_graph <- igraph::graph_from_data_frame(d=post_processes_nw_tmp[,2:10])
-# IL23, TNF, TSLP, IL4, IL6
+# positive - IL23, TNF, TSLP, IL4, IL6
 visualize_gene_set_subgraphs(post_processes_nw_as_graph , mono_genesets[19], nw_measures_res, centrality_measure = "page_rank") #IL6
-visualize_gene_set_subgraphs(post_processes_nw_as_graph , mono_genesets[33], nw_measures_res, centrality_measure = "page_rank") #TNFa
+visualize_gene_set_subgraphs(post_processes_nw_as_graph , mono_genesets[22], nw_measures_res, centrality_measure = "page_rank") #TNFa
 visualize_gene_set_subgraphs(post_processes_nw_as_graph , mono_genesets[12], nw_measures_res, centrality_measure = "page_rank") #IL23
 visualize_gene_set_subgraphs(post_processes_nw_as_graph , mono_genesets[18], nw_measures_res, centrality_measure = "page_rank") #IL4
 visualize_gene_set_subgraphs(post_processes_nw_as_graph , mono_genesets[23], nw_measures_res, centrality_measure = "page_rank") #TSLP
 
+# negative - BMP7, KLK5, KLK7, GPR15L
+visualize_gene_set_subgraphs(post_processes_nw_as_graph , mono_genesets[33], nw_measures_res, centrality_measure = "page_rank") #BMP7
+visualize_gene_set_subgraphs(post_processes_nw_as_graph , mono_genesets[26], nw_measures_res, centrality_measure = "page_rank") #GPR15L
+visualize_gene_set_subgraphs(post_processes_nw_as_graph , mono_genesets[28], nw_measures_res, centrality_measure = "page_rank") #KLK5
+visualize_gene_set_subgraphs(post_processes_nw_as_graph , mono_genesets[29], nw_measures_res, centrality_measure = "page_rank") #KLK7
 
 
 ###### Compare bio-exp to random- Run Shiran's code ###### 
@@ -326,11 +333,11 @@ fullList = unlist(combined_customSignatures, recursive = FALSE)
 names(fullList) = stringr::str_replace(names(fullList),"\\.","__")
 
 # background
-#nw_measures_res <- readRDS(get_task_outputs('wf-58b9314909', task_id = 0, files_names_grepl_pattern = "output.rds"))
+#nw_measures_res <- readRDS(get_task_outputs('wf-b887714056', task_id = 0, files_names_grepl_pattern = "output.rds"))
 EntrezInput = unique(as.character(nw_measures_res$feature_id))
 nIter <- 100 #updating number of iterations
 
-bulk_centrality_wf <- "wf-58b9314909" # nw_measures_res
+bulk_centrality_wf <- "wf-b887714056" # nw_measures_res
 
 bulk_nw_cent <-  cytoreason.cc.client::run_method_dist(
   method = "NWParam_VersusRandom_modified",  
@@ -343,5 +350,175 @@ bulk_nw_cent <-  cytoreason.cc.client::run_method_dist(
   image="eu.gcr.io/cytoreason/ci-analysis.p03.poc1-package:shiran_API_latest",
   Niter = nIter)
 
-# wf-65a5e3bfa0
+# wf-f034d1b873
 
+#process bulk geneset centrality
+library(tidyr)
+library(dplyr)
+library(scales)
+library(ggpubr, lib.loc = "/opt/R/4.4.2/lib/R/library")
+BulkAD_NW_cent <- read_asset("wf-f034d1b873")
+BulkAD_NW_cent_pval <- BulkAD_NW_cent$Significance
+BulkAD_NW_cent_pval$Criteria <- paste(BulkAD_NW_cent_pval$Criteria, BulkAD_NW_cent_pval$Measure, sep="_")
+BulkAD_NW_cent_pval$Criteria[BulkAD_NW_cent_pval$Criteria %in% "OverlapProbability_NA"] <- "OverlapPercent"
+
+BulkAD_NW_cent_values <- BulkAD_NW_cent$FullParam
+BulkAD_NW_cent_values <- BulkAD_NW_cent_values[BulkAD_NW_cent_values$ListType %in% "gene_list",]
+
+#add values in addition to pval
+BulkAD_NW_cent_values_long <- reshape2::melt(BulkAD_NW_cent_values , id.vars = c("ListType", "ListName"), variable.name = "Criteria")
+BulkAD_NW_cent <- merge(BulkAD_NW_cent_pval, BulkAD_NW_cent_values_long, by=c("ListName", "Criteria"), all.x=T)
+
+
+centralitySignificance_ALL = cbind(BulkAD_NW_cent,list(Type = "bulk"))
+centralitySignificance_ALL <-   centralitySignificance_ALL %>% dplyr::mutate(pval = ifelse(pval == 0, 1/(nIter+1), pval))
+
+centralitySignificance_ALL <- centralitySignificance_ALL %>%
+  separate(ListName, into = c("collection", "pathway"), sep = "__", extra = "merge", remove = FALSE)
+centralitySignificance_ALL$Identifier <- centralitySignificance_ALL$pathway
+
+
+#convert to final table structure
+#-----raw measure*significance---#
+
+nwCentrality <-  centralitySignificance_ALL %>%
+  dplyr::mutate(Identifier = ListName) %>%
+  dplyr::mutate(Subset = "L",
+                DataType = "subnetwork_centrality") %>%
+  dplyr::mutate(Disease = "UC") %>%
+  dplyr::mutate(NL.normalize = case_when(Subset == "L" ~ "no",
+                                         Subset == "L_vs_NL" ~ "yes")) %>%
+  dplyr::mutate(adjusted = case_when(Type == "bulk" ~ "no",
+                                     Type == "adjusted" ~ "yes")) %>%
+  dplyr::group_by(Criteria,Type, collection) %>%
+  dplyr::mutate(
+    # Check if all 'value' or 'pval' are identical
+    all_values_identical = n_distinct(value) == 1,
+    all_pvals_identical = n_distinct(pval) == 1,
+    # Rescale but if all identical values, set the scaled value to 1
+    scaled_value = if_else(all_values_identical, 1, rescale(x = value, to = c(0.1, 1))),
+    scaled_pval = if_else(all_pvals_identical, 1, rescale(x = (-log10(pval)), to = c(0.1, 1))),
+    # Compute the score as product of scaled value and scaled pval
+    Score = scaled_value * scaled_pval) %>%
+  #  dplyr::mutate(scaled_value = rescale(x = value, to=c(0.1,1)), 
+  #                scaled_pval = rescale(x = (-log10(pval)), to=c(0.1,1)), 
+  #                Score = scaled_value*scaled_pval) %>%
+  dplyr::mutate(SigScaled = Score) %>%
+  # dplyr::mutate(SigScaled = rescale(x = Score)) %>%
+  dplyr::select(Identifier,Criteria,Type,Subset,Score, SigScaled,DataType,value, Disease, pval, NL.normalize, adjusted, scaled_value,scaled_pval, collection)
+
+nwCentrality$Type <- factor(nwCentrality$Type, levels=c("bulk", "adjusted"))
+
+targetColors = read_asset("wf-c588727d1c") #bottom BTLA & SLAMF6
+
+#targetColors['PD1'] <- "#FFE4C4"
+names(targetColors)[names(targetColors) %in% "IL13.Dupi"] <- "IL13.minFDR"
+names(targetColors)[names(targetColors) %in% "IL4.Dupi"] <- "IL4.minFDR"
+
+nwCentrality <- nwCentrality[!grepl("3sd", nwCentrality$Identifier),]
+# nwCentrality <- nwCentrality[nwCentrality$BroadCategory %in% c("Target", "negativeControls"),]
+nwCentrality <- nwCentrality[!grepl("avg", nwCentrality$Identifier),]
+nwCentrality$SubCategory <- nwCentrality$Identifier
+nwCentrality$SubCategory <- gsub("monotherapies__","",nwCentrality$SubCategory)
+#nwCentrality$SubCategory[nwCentrality$Identifier == 'monotherapies__ad-permutations'] <- 'ad-permutations'
+nwCentrality$log10pval <- -log10(nwCentrality$pval)
+
+nwCentrality_page_rank <- nwCentrality[nwCentrality$Criteria %in% "page_rank_median",]
+nwCentrality_page_rank[nwCentrality_page_rank$SubCategory %in% "PD1",'SubCategory'] <- "PDL1"
+
+#ZeroCenteredProbability = -(2*(0.05 - .5))
+#NegLogPVAL_thr = -log10(1-abs(ZeroCenteredProbability))
+
+nwCentrality_page_rank$SubCategory <- factor(nwCentrality_page_rank$SubCategory, levels=rev(unique(filtered_data$SubCategory)))
+nwCentrality_page_rank <- nwCentrality_page_rank[!is.na(nwCentrality_page_rank$SubCategory),]
+
+tail_probability__page_rank_g <- ggplot(nwCentrality_page_rank, aes(x= reorder(SubCategory, value), y=-log10(pval), fill=SubCategory)) + 
+  facet_wrap(~Type, ncol=1)+
+  geom_bar(position=position_dodge(), stat="identity",color = "black") + 
+  scale_fill_manual(values = targetColors)+
+  coord_flip()+
+  border() +
+  ylab("Permutation Tail \n Probability") + xlab("")+
+  geom_hline(yintercept=1.0, linetype="dashed")+
+  theme_bw()+theme(strip.text = element_text(size=9), panel.grid.major = element_blank(),
+                   axis.text.y = element_text(size=8),
+                   panel.grid.minor = element_blank(),                                                                  
+                   strip.background = element_blank(),
+                   panel.border = element_rect(colour = "black"), 
+                   axis.ticks.length=unit(.15, "cm"), 
+                   legend.position = "none")
+
+tail_probability__page_rank_g
+
+###########################3
+# AD_NW_cent_df_sub_combined <- read_asset("wf-c8c1f9bf0f")
+BulkAD_NW_cent <- read_asset("wf-f034d1b873") # check what is missing
+BulkAD_NW_cent <- BulkAD_NW_cent$FullParam
+BulkAD_NW_cent$Type <- 'bulk'
+BulkAD_NW_cent$BroadCategory <- 'Target'
+BulkAD_NW_cent$Identifier <-  gsub("monotherapies__","",BulkAD_NW_cent$ListName)
+BulkAD_NW_cent$Identifier[BulkAD_NW_cent$Identifier == 'ad-permutations'] <-  'UC-permutations'
+
+BulkAD_NW_cent$CleanName <- BulkAD_NW_cent$Identifier
+BulkAD_NW_cent$SubCategory <-  BulkAD_NW_cent$Identifier
+BulkAD_NW_cent$BroadCategory[BulkAD_NW_cent$Identifier %in% c('KLK5', 'KLK7', 'GPR15L', 'BMP7','random-fc' ,'UC-permutations')] <- 'negativeControls'
+# colnames(AD_NW_cent_df_sub_combined)[!colnames(AD_NW_cent_df_sub_combined) %in% colnames(BulkAD_NW_cent)]
+
+
+#remove largest component criterion
+
+##### page rank gene_list vs random#####
+AD_NW_cent_df_sub_combined <- BulkAD_NW_cent
+AD_NW_cent_df_sub_combined_Target <- AD_NW_cent_df_sub_combined[!AD_NW_cent_df_sub_combined$Identifier %in% c("steadyArm__IL13.avgFDR","steadyArm__IL4.avgFDR"),]
+
+AD_NW_cent_df_sub_combined <- AD_NW_cent_df_sub_combined[!grepl("3sd", AD_NW_cent_df_sub_combined$ListName),]
+AD_NW_cent_df_sub_combined$Type <- factor(AD_NW_cent_df_sub_combined$Type)
+AD_NW_cent_df_sub_combined <- AD_NW_cent_df_sub_combined[!grepl("avg", AD_NW_cent_df_sub_combined$SubCategory),]
+
+#fix the factor (order) of the subcategories
+filtered_data <- AD_NW_cent_df_sub_combined %>%
+  dplyr::filter(ListType == "gene_list" & BroadCategory %in% c("Target", "negativeControls")) %>%
+  dplyr::mutate(Type = factor(Type, levels = c("bulk", "adjusted"))) %>%
+  # Ensure BroadCategory has "negativeControls" last
+  dplyr::mutate(BroadCategory = factor(BroadCategory, levels = c("Target", "negativeControls"))) %>%
+  # Order SubCategory by page_rank_median within each Type
+  dplyr::group_by(Type, BroadCategory) %>%
+  dplyr::arrange(Type, BroadCategory, desc(page_rank_median)) %>%
+  dplyr::mutate(SubCategory = factor(SubCategory, levels = rev(unique(SubCategory)))) %>%
+  dplyr::ungroup()
+
+filtered_data$SubCategory <- as.character(filtered_data$SubCategory)
+filtered_data[filtered_data$SubCategory %in% "PD1",'SubCategory'] <- "PDL1"
+filtered_data$SubCategory <- factor(filtered_data$SubCategory, levels=rev(unique(filtered_data$SubCategory)))
+
+library(patchwork)
+
+AD_NW_cent_df_sub_combined <- AD_NW_cent_df_sub_combined[AD_NW_cent_df_sub_combined$Type %in% "bulk",]
+
+max_values <- AD_NW_cent_df_sub_combined[AD_NW_cent_df_sub_combined$ListType %in% "gene_list",] %>%
+  dplyr::filter(BroadCategory %in% "negativeControls") %>%
+  dplyr::mutate(Type = factor(Type,levels = c("bulk","adjusted"))) %>%
+  dplyr::group_by(Type) %>%
+  dplyr::summarise(max_page_rank_median = max(page_rank_median, na.rm = TRUE)) 
+
+AD_NW_cent_df_sub_combined[AD_NW_cent_df_sub_combined$SubCategory %in% "PD1",'SubCategory'] <- "PDL1"
+
+page_rank_median_g = AD_NW_cent_df_sub_combined %>%
+  dplyr::filter(BroadCategory %in% c("Target", "negativeControls")) %>%
+  dplyr::mutate(Type = factor(Type,levels = c("bulk","adjusted"))) %>%
+  dplyr::select(c(ListName,page_rank_median,Type,SubCategory,CleanName,ListType)) %>%
+  dplyr::mutate(SubCategory = factor(SubCategory,levels = rev(as.character(unique(filtered_data$SubCategory))))) %>%
+  unique() %>%
+  ggplot(aes(x = SubCategory,y = page_rank_median)) +
+  facet_wrap(~ Type ,scales = "free",ncol = 1)+
+  geom_point(data = function(x) subset(x,ListType != "gene_list"),aes(color = SubCategory), alpha=0.5 ,color = "grey") +
+  geom_point(data = function(x) subset(x,ListType == "gene_list"),aes(color = SubCategory), size=3) +
+  geom_hline(data = max_values, aes(yintercept = max_page_rank_median), linetype = "dashed", color = "black") +  # Add hline here
+  coord_flip()+
+  theme_minimal() + 
+  theme(legend.position = "none")+
+  #  theme(aspect.ratio = 1.5) + 
+  border() +ylab("Median page rank - HC UC Targets") + xlab("") +
+  #  scale_x_log10() +
+  scale_color_manual(values = targetColors)
+page_rank_median_g
